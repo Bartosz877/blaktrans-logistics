@@ -38,10 +38,8 @@ jobs:
 
       - name: Fix enableBundleCompression in build.gradle
         run: |
-          # Remove deprecated enableBundleCompression property from app/build.gradle
           sed -i '/enableBundleCompression/d' android/app/build.gradle
-          echo "Patched build.gradle:"
-          grep -n "enableBundle\|react {" android/app/build.gradle || true
+          echo "Patched build.gradle - removed enableBundleCompression"
 
       - name: Make gradlew executable
         run: chmod +x android/gradlew
@@ -49,7 +47,7 @@ jobs:
       - name: Build Release APK
         run: |
           cd android
-          ./gradlew assembleRelease --no-daemon -Xmx3g
+          ./gradlew assembleRelease --no-daemon
         env:
           GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.workers.max=2 -Dorg.gradle.jvmargs=-Xmx3g"
 
