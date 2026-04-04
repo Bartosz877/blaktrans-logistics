@@ -51,9 +51,12 @@ jobs:
         env:
           GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.workers.max=2 -Dorg.gradle.jvmargs=-Xmx3g"
 
+      - name: Find APK
+        run: find android/app/build/outputs/apk -name "*.apk" | head -5
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: blaktrans-release-apk
-          path: android/app/build/outputs/apk/release/app-release-unsigned.apk
+          path: android/app/build/outputs/apk/release/*.apk
           retention-days: 7
