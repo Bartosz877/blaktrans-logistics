@@ -10,12 +10,11 @@ export default function AdminLayout() {
     >
       <Stack.Screen name="statystyki" />
       <Stack.Screen name="kadry" />
-      <Stack.Screen name="urlopy" />
       <Stack.Screen name="pojazdy" />
-      <Stack.Screen name="usterki" />
-      <Stack.Screen name="umowy" />
-      <Stack.Screen name="liczniki" />
-      <Stack.Screen name="dashboard" />
+      <Stack.Screen name="profil" />
+      <Stack.Screen name="skrzynka" />
+      <Stack.Screen name="powiadomienia" />
+      <Stack.Screen name="czat" />
     </Stack>
   );
 }

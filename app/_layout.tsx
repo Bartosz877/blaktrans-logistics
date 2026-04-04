@@ -47,13 +47,13 @@ function AuthGuard({
       if (!inAuth) {
         router.replace("/(auth)/login");
       }
-    } else if (user?.role === "administrator") {
-      // Admin — idź do statystyk
+    } else if (user?.role === "administrator" || user?.role === "ADMIN") {
+      // Administrator — panel admina
       if (!inAdmin) {
         router.replace("/(admin)/statystyki");
       }
     } else if (user) {
-      // Kierowca — idź do dashboardu kierowcy
+      // Kierowca i Dygacz (DRIVER) — panel użytkownika
       if (!inDriver) {
         router.replace("/(driver)/dashboard");
       }

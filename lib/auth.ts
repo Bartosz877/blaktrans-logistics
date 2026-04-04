@@ -5,7 +5,7 @@ import {
 import { doc, getDoc } from "firebase/firestore";
 import { auth, db } from "./firebase";
 
-export type UserRole = "administrator" | "driver";
+export type UserRole = "administrator" | "driver" | "ADMIN" | "DRIVER";
 
 export interface AppUser {
   uid: string;
@@ -24,15 +24,15 @@ export async function getUserData(uid: string): Promise<AppUser> {
       uid,
       email: data.email || "",
       role: (data.role as UserRole) || "driver",
-      name: data.name || data.displayName || "",
+      name: data.name || `${data.firstName || ''} ${data.lastName || ''}`.trim() || data.displayName || "",
       phone: data.phone || "",
     };
   }
-  // Default to administrator if no Firestore document
+  // Default to driver if no Firestore document
   return {
     uid,
     email: "",
-    role: "administrator",
+    role: "driver",
     name: "",
   };
 }

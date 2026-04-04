@@ -29,7 +29,7 @@ export default function LoginScreen() {
     setLoading(true);
     try {
       const user = await loginWithEmail(email.trim(), password);
-      if (user.role === "administrator") {
+      if (user.role === "administrator" || user.role === "ADMIN") {
         router.replace("/(admin)/statystyki");
       } else {
         router.replace("/(driver)/dashboard");
@@ -58,7 +58,7 @@ export default function LoginScreen() {
         contentContainerStyle={s.scroll}
         keyboardShouldPersistTaps="handled"
       >
-        {/* Logo BT */}
+        {/* Logo BT — bez białego tła, naturalnie na granatowym tle */}
         <View style={s.logoWrap}>
           <Image
             source={require("../../assets/logo.png")}
@@ -134,11 +134,13 @@ const s = StyleSheet.create({
   },
   logoWrap: {
     alignItems: "center",
-    marginBottom: 20,
+    marginBottom: 16,
+    // Brak backgroundColor — logo naturalnie na granatowym tle
   },
   logoImg: {
-    width: 120,
-    height: 120,
+    width: 160,
+    height: 160,
+    // Brak borderRadius ani backgroundColor — PNG ma transparentne tło
   },
   title: {
     fontSize: 28,
