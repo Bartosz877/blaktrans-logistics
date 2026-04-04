@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "151784365587",
+    "project_id": "blaktransapp",
+    "storage_bucket": "blaktransapp.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:151784365587:android:1bf8b6880a3b64c70569e6",
+        "android_client_info": {
+          "package_name": "space.manus.blaktrans.logistics"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBnUHwt2qoxUoq_YM_-FthcUAgoAHXnVVw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
