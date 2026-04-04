@@ -36,15 +36,22 @@ jobs:
         env:
           CI: 1
 
+      - name: Fix enableBundleCompression in build.gradle
+        run: |
+          # Remove deprecated enableBundleCompression property from app/build.gradle
+          sed -i '/enableBundleCompression/d' android/app/build.gradle
+          echo "Patched build.gradle:"
+          grep -n "enableBundle\|react {" android/app/build.gradle || true
+
       - name: Make gradlew executable
         run: chmod +x android/gradlew
 
       - name: Build Release APK
         run: |
           cd android
-          ./gradlew assembleRelease --no-daemon -Xmx2g
+          ./gradlew assembleRelease --no-daemon -Xmx3g
         env:
-          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.workers.max=2"
+          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.workers.max=2 -Dorg.gradle.jvmargs=-Xmx3g"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
