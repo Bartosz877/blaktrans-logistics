@@ -15,8 +15,8 @@ const firebaseConfig = {
 // Initialize Firebase app (singleton pattern)
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
-// Simple auth - no AsyncStorage persistence needed
-// Works on React Native without metro.config patches
+// Auth — getAuth() is safe on Firebase 12.x with Expo SDK 54
+// Firebase 12.x resolves ESM correctly on Hermes
 const auth = getAuth(app);
 const db = getFirestore(app);
 const storage = getStorage(app);
