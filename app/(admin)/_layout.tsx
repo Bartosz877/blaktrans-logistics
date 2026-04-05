@@ -15,6 +15,7 @@ export default function AdminLayout() {
       <Stack.Screen name="skrzynka" />
       <Stack.Screen name="powiadomienia" />
       <Stack.Screen name="czat" />
+      <Stack.Screen name="tachograf" />
     </Stack>
   );
 }
