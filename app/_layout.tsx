@@ -4,6 +4,7 @@ import { onAuthStateChanged, User } from "firebase/auth";
 import { auth } from "../lib/firebase";
 import { getUserData, AppUser } from "../lib/auth";
 import { View, ActivityIndicator } from "react-native";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 
 interface AuthContextType {
   user: AppUser | null;
@@ -94,28 +95,32 @@ export default function RootLayout() {
 
   if (loading) {
     return (
-      <View
-        style={{
-          flex: 1,
-          justifyContent: "center",
-          alignItems: "center",
-          backgroundColor: "#0D1B2A",
-        }}
-      >
-        <ActivityIndicator size="large" color="#F5A623" />
-      </View>
+      <SafeAreaProvider>
+        <View
+          style={{
+            flex: 1,
+            justifyContent: "center",
+            alignItems: "center",
+            backgroundColor: "#0D1B2A",
+          }}
+        >
+          <ActivityIndicator size="large" color="#F5A623" />
+        </View>
+      </SafeAreaProvider>
     );
   }
 
   return (
-    <AuthContext.Provider value={{ user, firebaseUser, loading, setUser }}>
-      <Stack screenOptions={{ headerShown: false }}>
-        <Stack.Screen name="index" />
-        <Stack.Screen name="(auth)" />
-        <Stack.Screen name="(admin)" />
-        <Stack.Screen name="(driver)" />
-      </Stack>
-      <AuthGuard firebaseUser={firebaseUser} user={user} loading={loading} />
-    </AuthContext.Provider>
+    <SafeAreaProvider>
+      <AuthContext.Provider value={{ user, firebaseUser, loading, setUser }}>
+        <Stack screenOptions={{ headerShown: false }}>
+          <Stack.Screen name="index" />
+          <Stack.Screen name="(auth)" />
+          <Stack.Screen name="(admin)" />
+          <Stack.Screen name="(driver)" />
+        </Stack>
+        <AuthGuard firebaseUser={firebaseUser} user={user} loading={loading} />
+      </AuthContext.Provider>
+    </SafeAreaProvider>
   );
 }

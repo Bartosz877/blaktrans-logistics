@@ -31,6 +31,8 @@ import { useRef } from "react";
 import AdminHeader from "../../components/AdminHeader";
 import AdminBottomNav from "../../components/AdminBottomNav";
 import { notifyLeaveApproved, notifyLeaveRejected, notifyEmployeeAdded } from "../../lib/notifications";
+import * as DocumentPicker from "expo-document-picker";
+import * as FileSystem from "expo-file-system/legacy";
 
 // ─── Types ───────────────────────────────────────────────────
 interface Employee {
@@ -1173,22 +1175,43 @@ function UmowyTab({ employees }: { employees: Employee[] }) {
     } catch {}
   }
 
-  function triggerUpload(empId: string) {
+  async function triggerUpload(empId: string) {
     setUploadTarget(empId);
+
     if (Platform.OS === "web") {
+      // Web: użyj natywnego input[type=file]
       const input = document.createElement("input");
       input.type = "file";
       input.accept = ".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
       input.onchange = async (e: any) => {
         const file = e.target.files?.[0];
         if (!file) return;
-        await uploadFile(empId, file);
+        await uploadFileWeb(empId, file);
       };
       input.click();
+    } else {
+      // Android / iOS: użyj expo-document-picker
+      try {
+        const result = await DocumentPicker.getDocumentAsync({
+          type: [
+            "application/pdf",
+            "application/msword",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          ],
+          copyToCacheDirectory: true,
+          multiple: false,
+        });
+        if (result.canceled || !result.assets || result.assets.length === 0) return;
+        const asset = result.assets[0];
+        await uploadFileNative(empId, asset);
+      } catch (err) {
+        console.error("DocumentPicker error:", err);
+      }
     }
   }
 
-  async function uploadFile(empId: string, file: any) {
+  // Upload na web (File object)
+  async function uploadFileWeb(empId: string, file: any) {
     setUploading(empId);
     try {
       const ext = file.name.split(".").pop()?.toLowerCase() || "pdf";
@@ -1218,7 +1241,57 @@ function UmowyTab({ employees }: { employees: Employee[] }) {
         [empId]: [...(prev[empId] || []), newFile],
       }));
     } catch (err) {
-      console.error("Upload error:", err);
+      console.error("Upload error (web):", err);
+    }
+    setUploading(null);
+  }
+
+  // Upload na Android/iOS (DocumentPickerAsset z URI)
+  async function uploadFileNative(empId: string, asset: DocumentPicker.DocumentPickerAsset) {
+    setUploading(empId);
+    try {
+      const fileName = asset.name;
+      const ext = fileName.split(".").pop()?.toLowerCase() || "pdf";
+      const storagePath = `contracts/${empId}/${Date.now()}_${fileName}`;
+      const storageRef = ref(storage, storagePath);
+
+      // Wczytaj plik jako base64 i skonwertuj na Uint8Array
+      const base64 = await FileSystem.readAsStringAsync(asset.uri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      const binaryStr = atob(base64);
+      const bytes = new Uint8Array(binaryStr.length);
+      for (let i = 0; i < binaryStr.length; i++) {
+        bytes[i] = binaryStr.charCodeAt(i);
+      }
+
+      const mimeType = asset.mimeType || "application/octet-stream";
+      await uploadBytes(storageRef, bytes, { contentType: mimeType });
+      const fileUrl = await getDownloadURL(storageRef);
+
+      const docRef = await addDoc(collection(db, "contractFiles"), {
+        employeeId: empId,
+        fileName,
+        fileUrl,
+        storagePath,
+        fileType: ext,
+        uploadedAt: serverTimestamp(),
+      });
+      const newFile: ContractFile = {
+        id: docRef.id,
+        employeeId: empId,
+        fileName,
+        fileUrl,
+        storagePath,
+        fileType: ext,
+        uploadedAt: new Date(),
+      };
+      setContractFiles((prev) => ({
+        ...prev,
+        [empId]: [...(prev[empId] || []), newFile],
+      }));
+    } catch (err) {
+      console.error("Upload error (native):", err);
     }
     setUploading(null);
   }
@@ -1245,6 +1318,9 @@ function UmowyTab({ employees }: { employees: Employee[] }) {
   function openFile(url: string) {
     if (Platform.OS === "web") {
       window.open(url, "_blank");
+    } else {
+      // Android / iOS: otwórz URL w przeglądarce
+      import("expo-linking").then(({ openURL }) => openURL(url)).catch(() => {});
     }
   }
 

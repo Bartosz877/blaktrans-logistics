@@ -139,11 +139,6 @@ export default function AdminHeader({ pageTitle }: AdminHeaderProps) {
               <Text style={s.menuText}>Mój profil</Text>
             </TouchableOpacity>
             <View style={s.menuDivider} />
-            <TouchableOpacity style={s.menuItem} onPress={handleInbox}>
-              <Text style={s.menuIcon}>💬</Text>
-              <Text style={s.menuText}>Czat</Text>
-            </TouchableOpacity>
-            <View style={s.menuDivider} />
             <TouchableOpacity style={s.menuItem} onPress={handleNotifications}>
               <Text style={s.menuIcon}>🔔</Text>
               <Text style={s.menuText}>

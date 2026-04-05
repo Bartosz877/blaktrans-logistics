@@ -1,8 +1,10 @@
 import { View, Text, TouchableOpacity, StyleSheet, Platform } from "react-native";
 import { router, usePathname } from "expo-router";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 export default function AdminBottomNav() {
   const pathname = usePathname();
+  const insets = useSafeAreaInsets();
 
   const tabs = [
     { key: "statystyki", label: "Statystyki", icon: "📊", route: "/(admin)/statystyki" },
@@ -15,15 +17,12 @@ export default function AdminBottomNav() {
     return pathname.includes(key);
   }
 
-  // Safe area bottom padding:
-  // Android z gestami nawigacji: ~16-20px
-  // Web: brak paska systemowego
-  // iOS: obsługiwane przez SafeAreaView w natywnym APK
+  // Użyj rzeczywistego inset z systemu operacyjnego.
+  // Na Android z gestową nawigacją może to być 28-48px.
+  // Na web insets są zerowe, więc dodajemy minimalny padding.
   const bottomPad = Platform.select({
-    android: 20,
     web: 6,
-    ios: 0,
-    default: 6,
+    default: Math.max(insets.bottom, 8),
   });
 
   return (
@@ -53,7 +52,7 @@ const s = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: "#2A3A4A",
     paddingTop: 10,
-    // paddingBottom ustawiane dynamicznie
+    // paddingBottom ustawiane dynamicznie przez useSafeAreaInsets
   },
   navItem: {
     flex: 1,
