@@ -38,8 +38,8 @@ import {
 } from "firebase/firestore";
 import { db } from "../../lib/firebase";
 import { useAuth } from "../_layout";
-import AdminHeader from "../../components/AdminHeader";
-import AdminBottomNav from "../../components/AdminBottomNav";
+import DriverHeader from "../../components/DriverHeader";
+
 import { useRouter } from "expo-router";
 
 // ─── Types ───────────────────────────────────────────────────
@@ -280,7 +280,7 @@ export default function CzatScreen() {
 
   return (
     <View style={s.container}>
-      <AdminHeader />
+      <DriverHeader />
 
       {/* ── Nagłówek czatu ── */}
       <View style={s.chatHeader}>
@@ -421,7 +421,7 @@ export default function CzatScreen() {
         </View>
       </KeyboardAvoidingView>
 
-      <AdminBottomNav />
+      
 
       {/* ── Modal wyboru rozmówcy ── */}
       <Modal

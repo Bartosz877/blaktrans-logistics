@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useLocalSearchParams, useRouter as _useRouter } from "expo-router";
 import {
   View,
   Text,
@@ -25,18 +26,22 @@ import {
   orderBy,
   where,
 } from "firebase/firestore";
-import { db, storage } from "../../lib/firebase";
+import { db, storage, secondaryAuth } from "../../lib/firebase";
+import { createUserWithEmailAndPassword, signOut as secondarySignOut } from "firebase/auth";
 import { ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import { useRef } from "react";
 import AdminHeader from "../../components/AdminHeader";
 import AdminBottomNav from "../../components/AdminBottomNav";
-import { notifyLeaveApproved, notifyLeaveRejected, notifyEmployeeAdded } from "../../lib/notifications";
+import { notifyLeaveApproved, notifyLeaveRejected, notifyEmployeeAdded, notifyContractAdded } from "../../lib/notifications";
+import { pushContractAdded } from "../../lib/pushNotifications";
+import { deleteUserAccount, suspendUserAccount, unsuspendUserAccount } from "../../lib/adminAuth";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
 
 // ─── Types ───────────────────────────────────────────────────
 interface Employee {
   id: string;
+  uid?: string;
   firstName: string;
   lastName: string;
   email: string;
@@ -50,6 +55,7 @@ interface Employee {
   contractTo?: string;
   driverLicenseExpiry: string;
   driverCardExpiry: string;
+  suspended?: boolean;
 }
 
 interface ContractFile {
@@ -60,6 +66,21 @@ interface ContractFile {
   storagePath: string;
   uploadedAt: any;
   fileType: string;
+}
+
+interface Contract {
+  id: string;
+  employeeId: string;
+  employeeName?: string;
+  employmentType: string;
+  contractFrom: string;
+  contractTo: string; // "bezterminowa" or DD.MM.RRRR
+  fileUrl?: string;
+  fileName?: string;
+  storagePath?: string;
+  fileType?: string;
+  createdAt?: any;
+  isActive?: boolean;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────
@@ -99,7 +120,7 @@ function getStatusLabel(status: string): string {
 function workTypeToRole(workType: string): string {
   switch (workType) {
     case "Administrator": return "ADMIN";
-    case "Dygacz": return "DRIVER";
+    case "Dygacz": return "dygacz";
     case "Kierowca":
     default: return "DRIVER";
   }
@@ -113,12 +134,11 @@ const EMPTY_FORM = {
   phone: "",
   workType: "Kierowca",
   birthDate: "",
-  employmentType: "umowa o pracę",
-  contractFrom: "",
-  contractTo: "",
   driverLicenseExpiry: "",
   driverCardExpiry: "",
   status: "Aktywny",
+  password: "",
+  passwordConfirm: "",
 };
 
 // Tylko 3 role zgodnie z wymaganiami
@@ -134,6 +154,7 @@ function FormField({
   placeholder,
   keyboardType = "default",
   required = false,
+  secureTextEntry = false,
 }: {
   label: string;
   value: string;
@@ -141,6 +162,7 @@ function FormField({
   placeholder?: string;
   keyboardType?: any;
   required?: boolean;
+  secureTextEntry?: boolean;
 }) {
   return (
     <View style={ms.fieldWrap}>
@@ -153,6 +175,7 @@ function FormField({
         placeholderTextColor="#4A6080"
         keyboardType={keyboardType}
         autoCapitalize="none"
+        secureTextEntry={secureTextEntry}
       />
     </View>
   );
@@ -262,12 +285,11 @@ function EmployeeFormModal({
         phone: editEmployee.phone || "",
         workType: editEmployee.workType || "Kierowca",
         birthDate: editEmployee.birthDate || "",
-        employmentType: editEmployee.employmentType || "umowa o pracę",
-        contractFrom: editEmployee.contractFrom || "",
-        contractTo: editEmployee.contractTo || "",
         driverLicenseExpiry: editEmployee.driverLicenseExpiry || "",
         driverCardExpiry: editEmployee.driverCardExpiry || "",
         status: editEmployee.status || "Aktywny",
+        password: "",
+        passwordConfirm: "",
       });
     } else {
       setForm({ ...EMPTY_FORM });
@@ -288,21 +310,34 @@ function EmployeeFormModal({
       setErrorMsg("Email jest wymagany.");
       return;
     }
+    // Walidacja hasła tylko przy tworzeniu nowego użytkownika
+    if (!isEdit) {
+      if (!form.password) {
+        setErrorMsg("Hasło jest wymagane przy tworzeniu konta.");
+        return;
+      }
+      if (form.password.length < 6) {
+        setErrorMsg("Hasło musi mieć co najmniej 6 znaków.");
+        return;
+      }
+      if (form.password !== form.passwordConfirm) {
+        setErrorMsg("Hasła nie są zgodne.");
+        return;
+      }
+    }
     setErrorMsg("");
     setSaving(true);
     try {
       const role = workTypeToRole(form.workType);
+      const emailLower = form.email.trim().toLowerCase();
       const data = {
         firstName: form.firstName.trim(),
         lastName: form.lastName.trim(),
         name: `${form.firstName.trim()} ${form.lastName.trim()}`,
-        email: form.email.trim().toLowerCase(),
+        email: emailLower,
         phone: form.phone.trim(),
         workType: form.workType,
         birthDate: form.birthDate.trim(),
-        employmentType: form.employmentType,
-        contractFrom: form.contractFrom.trim(),
-        contractTo: form.contractTo.trim(),
         driverLicenseExpiry: form.driverLicenseExpiry.trim(),
         driverCardExpiry: form.driverCardExpiry.trim(),
         status: form.status,
@@ -311,10 +346,38 @@ function EmployeeFormModal({
       };
 
       if (isEdit && editEmployee) {
+        // Edycja: tylko aktualizuj dane pracownika (bez zmiany hasła)
         await updateDoc(doc(db, "employees", editEmployee.id), data);
       } else {
-        await addDoc(collection(db, "employees"), {
+        // Nowy pracownik: utwórz konto Firebase Auth używając SECONDARY auth
+        // (secondaryAuth nie zmienia sesji aktualnie zalogowanego admina)
+        const cred = await createUserWithEmailAndPassword(
+          secondaryAuth,
+          emailLower,
+          form.password
+        );
+        const uid = cred.user.uid;
+
+        // Wyloguj z secondary auth — nie potrzebujemy tej sesji
+        try { await secondarySignOut(secondaryAuth); } catch {}
+
+        // Utwórz dokument w kolekcji employees z uid
+        const empRef = await addDoc(collection(db, "employees"), {
           ...data,
+          uid,
+          createdAt: serverTimestamp(),
+        });
+
+        // Utwórz dokument w kolekcji users (wymagany przez _layout.tsx)
+        await setDoc(doc(db, "users", uid), {
+          uid,
+          email: emailLower,
+          role,
+          name: `${form.firstName.trim()} ${form.lastName.trim()}`,
+          firstName: form.firstName.trim(),
+          lastName: form.lastName.trim(),
+          phone: form.phone.trim(),
+          employeeId: empRef.id,
           createdAt: serverTimestamp(),
         });
       }
@@ -322,7 +385,17 @@ function EmployeeFormModal({
       onSaved();
       onClose();
     } catch (e: any) {
-      setErrorMsg("Nie udało się zapisać: " + e.message);
+      // Przyjazne komunikaty błędów Firebase Auth
+      const code = e?.code || "";
+      if (code === "auth/email-already-in-use") {
+        setErrorMsg("Ten adres email jest już zarejestrowany w systemie.");
+      } else if (code === "auth/invalid-email") {
+        setErrorMsg("Nieprawidłowy format adresu email.");
+      } else if (code === "auth/weak-password") {
+        setErrorMsg("Hasło jest zbyt słabe. Użyj co najmniej 6 znaków.");
+      } else {
+        setErrorMsg("Nie udało się zapisać: " + (e.message || e));
+      }
     } finally {
       setSaving(false);
     }
@@ -365,18 +438,37 @@ function EmployeeFormModal({
           <FormField label="Email * (login)" value={form.email} onChangeText={(v) => setField("email", v)} placeholder="email@firma.pl" keyboardType="email-address" />
           <FormField label="Telefon" value={form.phone} onChangeText={(v) => setField("phone", v)} placeholder="Numer telefonu" keyboardType="phone-pad" />
 
+          {/* Hasło — tylko przy tworzeniu nowego konta */}
+          {!isEdit && (
+            <>
+              <View style={ms.sectionHeader}>
+                <Text style={ms.sectionIcon}>🔐</Text>
+                <Text style={ms.sectionTitle}>Hasło do konta</Text>
+              </View>
+              <FormField
+                label="Hasło *"
+                value={form.password}
+                onChangeText={(v) => setField("password", v)}
+                placeholder="Min. 6 znaków"
+                secureTextEntry
+                required
+              />
+              <FormField
+                label="Powtórz hasło *"
+                value={form.passwordConfirm}
+                onChangeText={(v) => setField("passwordConfirm", v)}
+                placeholder="Powtórz hasło"
+                secureTextEntry
+                required
+              />
+            </>
+          )}
+
           {/* Stanowisko — tylko 3 opcje */}
           <SelectField label="Stanowisko" value={form.workType} options={WORK_TYPE_OPTIONS} onChange={(v) => setField("workType", v)} />
 
           {/* Data urodzenia */}
           <FormField label="Data urodzenia" value={form.birthDate} onChangeText={(v) => setField("birthDate", v)} placeholder="DD.MM.RRRR" />
-
-          {/* Rodzaj umowy */}
-          <SelectField label="Rodzaj umowy" value={form.employmentType} options={EMPLOYMENT_OPTIONS} onChange={(v) => setField("employmentType", v)} />
-
-          {/* Daty umowy */}
-          <FormField label="Umowa od" value={form.contractFrom} onChangeText={(v) => setField("contractFrom", v)} placeholder="DD.MM.RRRR" />
-          <FormField label="Umowa do" value={form.contractTo} onChangeText={(v) => setField("contractTo", v)} placeholder="DD.MM.RRRR lub bezterminowa" />
 
           {/* Ważność dokumentów */}
           <View style={ms.sectionHeader}>
@@ -434,10 +526,14 @@ function EmployeeCard({
   emp,
   onEdit,
   onDelete,
+  onSuspend,
+  onUnsuspend,
 }: {
   emp: Employee;
   onEdit: () => void;
   onDelete: () => void;
+  onSuspend: () => void;
+  onUnsuspend: () => void;
 }) {
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const statusColor = getStatusColor(emp.status);
@@ -445,6 +541,14 @@ function EmployeeCard({
   const fullName = emp.firstName && emp.lastName
     ? `${emp.firstName} ${emp.lastName}`
     : emp.firstName || emp.lastName || "—";
+
+  // Kolor stanowiska: Dygacz różowy, Kierowca niebieski, Administrator czerwony
+  const roleColor = (() => {
+    const wt = (emp.workType || "").toLowerCase();
+    if (wt === "dygacz") return "#F472B6";
+    if (wt === "administrator") return "#F87171";
+    return "#60A5FA"; // Kierowca — niebieski
+  })();
 
   function handleDeletePress(e: any) {
     e.stopPropagation?.();
@@ -454,6 +558,15 @@ function EmployeeCard({
   function handleConfirmDelete() {
     setShowDeleteModal(false);
     onDelete();
+  }
+
+  function handleSuspendPress(e: any) {
+    e.stopPropagation?.();
+    if (emp.suspended) {
+      onUnsuspend();
+    } else {
+      onSuspend();
+    }
   }
 
   return (
@@ -469,7 +582,7 @@ function EmployeeCard({
 
         <View style={s.empInfo}>
           <Text style={s.empName}>{fullName}</Text>
-          <Text style={s.empRole}>{emp.workType || "—"}</Text>
+          <Text style={[s.empRole, { color: roleColor }]}>{emp.workType || "—"}</Text>
           {emp.email ? <Text style={s.empEmail}>{emp.email}</Text> : null}
           {emp.phone ? <Text style={s.empPhone}>📞 {emp.phone}</Text> : null}
           <View style={s.empTagsRow}>
@@ -496,6 +609,13 @@ function EmployeeCard({
             <View style={[s.statusDot, { backgroundColor: statusColor }]} />
             <Text style={[s.statusText, { color: statusColor }]}>{statusLabel}</Text>
           </View>
+          <TouchableOpacity
+            style={[s.suspendBtn, emp.suspended && s.suspendBtnActive]}
+            onPress={handleSuspendPress}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Text style={s.suspendBtnText}>{emp.suspended ? "🔓" : "🔒"}</Text>
+          </TouchableOpacity>
           <TouchableOpacity
             style={s.deleteBtn}
             onPress={handleDeletePress}
@@ -566,6 +686,7 @@ interface LeaveRequest {
   id: string;
   employeeId?: string;
   employeeName?: string;
+  employeeEmail?: string;
   firstName?: string;
   lastName?: string;
   dateFrom: string;
@@ -574,6 +695,7 @@ interface LeaveRequest {
   reason?: string;
   status: "pending" | "approved" | "rejected";
   createdAt?: any;
+  docUrl?: string;
 }
 
 // ─── Zakładka Grafik ──────────────────────────────────────────
@@ -872,7 +994,11 @@ function GrafikTab({ employees }: { employees: Employee[] }) {
                     <Text style={gt.pickerItemName}>
                       {`${emp.firstName || ""} ${emp.lastName || ""}`.trim()}
                     </Text>
-                    <Text style={gt.pickerItemRole}>{emp.workType || "—"}</Text>
+                    <Text style={[gt.pickerItemRole, {
+                      color: (emp.workType || "").toLowerCase() === "dygacz" ? "#F472B6"
+                           : (emp.workType || "").toLowerCase() === "administrator" ? "#F87171"
+                           : "#60A5FA"
+                    }]}>{emp.workType || "—"}</Text>
                   </View>
                 </TouchableOpacity>
               ))}
@@ -884,14 +1010,24 @@ function GrafikTab({ employees }: { employees: Employee[] }) {
   );
 }
 
-// ─── Zakładka Urlopy ──────────────────────────────────────────
-function UrlopTab() {
+// ─── Zakładka Urlopy ─────────────────────────────────────────────────
+function UrlopTab({ initialLeaveId, onLeaveOpened }: { initialLeaveId?: string | null; onLeaveOpened?: () => void }) {
   const [leaves, setLeaves] = useState<LeaveRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<"all" | "pending" | "approved" | "rejected">("all");
   const [selected, setSelected] = useState<LeaveRequest | null>(null);
 
   useEffect(() => { loadLeaves(); }, []);
+
+  // Otwórz konkretny wniosek gdy przekazano initialLeaveId (z powiadomienia)
+  useEffect(() => {
+    if (!initialLeaveId || loading) return;
+    const leave = leaves.find((l) => l.id === initialLeaveId);
+    if (leave) {
+      setSelected(leave);
+      onLeaveOpened?.();
+    }
+  }, [initialLeaveId, leaves, loading]);
 
   async function loadLeaves() {
     setLoading(true);
@@ -920,10 +1056,11 @@ function UrlopTab() {
       const leaveItem = leaves.find((l) => l.id === id) || selected;
       const empName = leaveItem ? `${leaveItem.firstName || ""} ${leaveItem.lastName || ""}`.trim() : "Pracownik";
       try {
+        const empEmail = (leaveItem as any)?.employeeEmail || "";
         if (status === "approved") {
-          await notifyLeaveApproved(empName, leaveItem?.dateFrom || "", leaveItem?.dateTo || "");
+          await notifyLeaveApproved(empName, leaveItem?.dateFrom || "", leaveItem?.dateTo || "", empEmail || undefined, id);
         } else {
-          await notifyLeaveRejected(empName, leaveItem?.dateFrom || "", leaveItem?.dateTo || "");
+          await notifyLeaveRejected(empName, leaveItem?.dateFrom || "", leaveItem?.dateTo || "", empEmail || undefined, id);
         }
       } catch {}
 
@@ -1033,6 +1170,51 @@ function UrlopTab() {
             </>
           ) : null}
         </View>
+
+        {/* Plik wniosku */}
+        {selected.docUrl ? (
+          <View style={ut.docSection}>
+            <Text style={ut.docSectionTitle}>📎 Plik wniosku</Text>
+            <View style={ut.docBtnRow}>
+              <TouchableOpacity
+                style={ut.docPreviewBtn}
+                onPress={() => {
+                  const url = selected.docUrl!;
+                  if (Platform.OS === "web") {
+                    if (typeof window !== "undefined") window.open(url, "_blank");
+                  } else {
+                    import("expo-linking").then(({ openURL }) => openURL(url)).catch(() => {});
+                  }
+                }}
+              >
+                <Text style={ut.docPreviewBtnText}>👁 Podgląd</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={ut.docDownloadBtn}
+                onPress={() => {
+                  const url = selected.docUrl!;
+                  if (Platform.OS === "web") {
+                    if (typeof window !== "undefined") {
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.download = "wniosek_urlopowy.docx";
+                      a.click();
+                    }
+                  } else {
+                    import("expo-linking").then(({ openURL }) => openURL(url)).catch(() => {});
+                  }
+                }}
+              >
+                <Text style={ut.docDownloadBtnText}>⬇ Pobierz</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        ) : (
+          <View style={ut.docSection}>
+            <Text style={ut.docSectionTitle}>📎 Plik wniosku</Text>
+            <Text style={ut.docMissing}>Brak pliku wniosku</Text>
+          </View>
+        )}
 
         {selected.status === "pending" && (
           <View style={ut.actionRow}>
@@ -1150,341 +1332,733 @@ function UrlopTab() {
 }
 
 // ─── Zakładka Umowy ───────────────────────────────────────────
+const EMPTY_CONTRACT_FORM = {
+  employeeId: "",
+  employmentType: "umowa o pracę",
+  contractFrom: "",
+  contractTo: "",
+};
+
 function UmowyTab({ employees }: { employees: Employee[] }) {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const [contractFiles, setContractFiles] = useState<Record<string, ContractFile[]>>({});
-  const [uploading, setUploading] = useState<string | null>(null); // employeeId
-  const [deleting, setDeleting] = useState<string | null>(null); // fileId
-  const fileInputRef = useRef<any>(null);
-  const [uploadTarget, setUploadTarget] = useState<string | null>(null); // employeeId
+  const [contracts, setContracts] = useState<Contract[]>([]);
+  const [loadingContracts, setLoadingContracts] = useState(true);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [addForm, setAddForm] = useState({ ...EMPTY_CONTRACT_FORM });
+  const [addFile, setAddFile] = useState<{ name: string; url: string; storagePath: string; type: string } | null>(null);
+  const [addSaving, setAddSaving] = useState(false);
+  const [addError, setAddError] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  // Edycja umowy
+  const [editContract, setEditContract] = useState<Contract | null>(null);
+  const [editForm, setEditForm] = useState({ ...EMPTY_CONTRACT_FORM });
+  const [editFile, setEditFile] = useState<{ name: string; url: string; storagePath: string; type: string } | null>(null);
+  const [editSaving, setEditSaving] = useState(false);
+  const [editError, setEditError] = useState("");
+  const [editUploading, setEditUploading] = useState(false);
 
-  // Załaduj pliki umów przy starcie
-  useEffect(() => { loadContractFiles(); }, []);
+  useEffect(() => { loadContracts(); }, []);
 
-  async function loadContractFiles() {
+  async function loadContracts() {
+    setLoadingContracts(true);
     try {
-      const snap = await getDocs(collection(db, "contractFiles"));
-      const map: Record<string, ContractFile[]> = {};
-      snap.docs.forEach((d) => {
-        const f = { id: d.id, ...d.data() } as ContractFile;
-        if (!map[f.employeeId]) map[f.employeeId] = [];
-        map[f.employeeId].push(f);
-      });
-      setContractFiles(map);
-    } catch {}
+      const snap = await getDocs(
+        query(collection(db, "contracts"), orderBy("createdAt", "desc"))
+      );
+      setContracts(snap.docs.map((d) => ({ id: d.id, ...d.data() } as Contract)));
+    } catch {
+      try {
+        const snap = await getDocs(collection(db, "contracts"));
+        setContracts(snap.docs.map((d) => ({ id: d.id, ...d.data() } as Contract)));
+      } catch {}
+    }
+    setLoadingContracts(false);
   }
 
-  async function triggerUpload(empId: string) {
-    setUploadTarget(empId);
+  function setAddField(key: string, value: string) {
+    setAddForm((prev) => ({ ...prev, [key]: value }));
+  }
 
+  async function pickFile() {
     if (Platform.OS === "web") {
-      // Web: użyj natywnego input[type=file]
       const input = document.createElement("input");
       input.type = "file";
       input.accept = ".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
       input.onchange = async (e: any) => {
         const file = e.target.files?.[0];
         if (!file) return;
-        await uploadFileWeb(empId, file);
+        await uploadFileWeb(file);
       };
       input.click();
     } else {
-      // Android / iOS: użyj expo-document-picker
       try {
         const result = await DocumentPicker.getDocumentAsync({
-          type: [
-            "application/pdf",
-            "application/msword",
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-          ],
+          type: ["application/pdf", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
           copyToCacheDirectory: true,
           multiple: false,
         });
         if (result.canceled || !result.assets || result.assets.length === 0) return;
-        const asset = result.assets[0];
-        await uploadFileNative(empId, asset);
+        await uploadFileNative(result.assets[0]);
       } catch (err) {
         console.error("DocumentPicker error:", err);
       }
     }
   }
 
-  // Upload na web (File object)
-  async function uploadFileWeb(empId: string, file: any) {
-    setUploading(empId);
+  async function uploadFileWeb(file: any) {
+    setUploading(true);
     try {
       const ext = file.name.split(".").pop()?.toLowerCase() || "pdf";
-      const storagePath = `contracts/${empId}/${Date.now()}_${file.name}`;
+      const storagePath = `contracts/new/${Date.now()}_${file.name}`;
       const storageRef = ref(storage, storagePath);
       await uploadBytes(storageRef, file);
-      const fileUrl = await getDownloadURL(storageRef);
-      const docRef = await addDoc(collection(db, "contractFiles"), {
-        employeeId: empId,
-        fileName: file.name,
-        fileUrl,
-        storagePath,
-        fileType: ext,
-        uploadedAt: serverTimestamp(),
-      });
-      const newFile: ContractFile = {
-        id: docRef.id,
-        employeeId: empId,
-        fileName: file.name,
-        fileUrl,
-        storagePath,
-        fileType: ext,
-        uploadedAt: new Date(),
-      };
-      setContractFiles((prev) => ({
-        ...prev,
-        [empId]: [...(prev[empId] || []), newFile],
-      }));
+      const url = await getDownloadURL(storageRef);
+      setAddFile({ name: file.name, url, storagePath, type: ext });
     } catch (err) {
       console.error("Upload error (web):", err);
+      setAddError("Nie udało się przesłać pliku.");
     }
-    setUploading(null);
+    setUploading(false);
   }
 
-  // Upload na Android/iOS (DocumentPickerAsset z URI)
-  async function uploadFileNative(empId: string, asset: DocumentPicker.DocumentPickerAsset) {
-    setUploading(empId);
+  function base64ToUint8Array(base64: string): Uint8Array {
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const lookup: Record<string, number> = {};
+    for (let i = 0; i < chars.length; i++) lookup[chars[i]] = i;
+    const clean = base64.replace(/[^A-Za-z0-9+/]/g, "");
+    const len = Math.floor((clean.length * 3) / 4);
+    const bytes = new Uint8Array(len);
+    let byteIndex = 0;
+    for (let i = 0; i < clean.length; i += 4) {
+      const a = lookup[clean[i]] ?? 0;
+      const b = lookup[clean[i + 1]] ?? 0;
+      const c = lookup[clean[i + 2]] ?? 0;
+      const d = lookup[clean[i + 3]] ?? 0;
+      bytes[byteIndex++] = (a << 2) | (b >> 4);
+      if (clean[i + 2] !== "=") bytes[byteIndex++] = ((b & 15) << 4) | (c >> 2);
+      if (clean[i + 3] !== "=") bytes[byteIndex++] = ((c & 3) << 6) | d;
+    }
+    return bytes.slice(0, byteIndex);
+  }
+
+  async function uploadFileNative(asset: DocumentPicker.DocumentPickerAsset) {
+    setUploading(true);
     try {
       const fileName = asset.name;
       const ext = fileName.split(".").pop()?.toLowerCase() || "pdf";
-      const storagePath = `contracts/${empId}/${Date.now()}_${fileName}`;
+      const storagePath = `contracts/new/${Date.now()}_${fileName}`;
       const storageRef = ref(storage, storagePath);
-
-      // Wczytaj plik jako base64 i skonwertuj na Uint8Array
       const base64 = await FileSystem.readAsStringAsync(asset.uri, {
         encoding: FileSystem.EncodingType.Base64,
       });
-      const binaryStr = atob(base64);
-      const bytes = new Uint8Array(binaryStr.length);
-      for (let i = 0; i < binaryStr.length; i++) {
-        bytes[i] = binaryStr.charCodeAt(i);
-      }
-
+      const bytes = base64ToUint8Array(base64);
       const mimeType = asset.mimeType || "application/octet-stream";
       await uploadBytes(storageRef, bytes, { contentType: mimeType });
-      const fileUrl = await getDownloadURL(storageRef);
-
-      const docRef = await addDoc(collection(db, "contractFiles"), {
-        employeeId: empId,
-        fileName,
-        fileUrl,
-        storagePath,
-        fileType: ext,
-        uploadedAt: serverTimestamp(),
-      });
-      const newFile: ContractFile = {
-        id: docRef.id,
-        employeeId: empId,
-        fileName,
-        fileUrl,
-        storagePath,
-        fileType: ext,
-        uploadedAt: new Date(),
-      };
-      setContractFiles((prev) => ({
-        ...prev,
-        [empId]: [...(prev[empId] || []), newFile],
-      }));
+      const url = await getDownloadURL(storageRef);
+      setAddFile({ name: fileName, url, storagePath, type: ext });
     } catch (err) {
       console.error("Upload error (native):", err);
+      setAddError("Nie udało się przesłać pliku.");
     }
-    setUploading(null);
+    setUploading(false);
   }
 
-  async function deleteFile(file: ContractFile) {
-    setDeleting(file.id);
+  async function handleAddContract() {
+    if (!addForm.employeeId) { setAddError("Wybierz pracownika."); return; }
+    if (!addForm.contractFrom.trim()) { setAddError("Podaj datę początku umowy."); return; }
+    setAddError("");
+    setAddSaving(true);
     try {
-      // Usuń z Storage
-      try {
-        const storageRef = ref(storage, file.storagePath);
-        await deleteObject(storageRef);
-      } catch {}
-      // Usuń z Firestore
-      await deleteDoc(doc(db, "contractFiles", file.id));
-      // Odśwież lokalnie
-      setContractFiles((prev) => ({
-        ...prev,
-        [file.employeeId]: (prev[file.employeeId] || []).filter((f) => f.id !== file.id),
-      }));
+      const emp = employees.find((e) => e.id === addForm.employeeId);
+      const employeeName = emp ? `${emp.firstName} ${emp.lastName}` : "";
+      // Oblicz isActive: umowa aktywna jeśli contractTo jest puste lub w przyszłości
+      const toDate = addForm.contractTo.trim() ? parseDate(addForm.contractTo.trim()) : null;
+      const isActive = !toDate || toDate >= new Date();
+      const contractData: any = {
+        employeeId: addForm.employeeId,
+        employeeName,
+        employmentType: addForm.employmentType,
+        contractFrom: addForm.contractFrom.trim(),
+        contractTo: addForm.contractTo.trim() || "bezterminowa",
+        isActive,
+        createdAt: serverTimestamp(),
+      };
+      if (addFile) {
+        contractData.fileUrl = addFile.url;
+        contractData.fileName = addFile.name;
+        contractData.storagePath = addFile.storagePath;
+        contractData.fileType = addFile.type;
+      }
+      const docRef = await addDoc(collection(db, "contracts"), contractData);
+      const newContract: Contract = {
+        id: docRef.id,
+        ...contractData,
+        createdAt: new Date(),
+      };
+      setContracts((prev) => [newContract, ...prev]);
+      setShowAddModal(false);
+      setAddForm({ ...EMPTY_CONTRACT_FORM });
+      setAddFile(null);
+
+      // Powiadomienie in-app + push dla pracownika (nie dla admina)
+      const empEmail = emp?.email || "";
+      if (empEmail) {
+        // In-app notification zapisane w Firestore
+        notifyContractAdded(
+          empEmail,
+          employeeName,
+          docRef.id,
+          addForm.employmentType
+        ).catch(() => {});
+        // Push notification na telefon
+        pushContractAdded(empEmail, addForm.employmentType).catch(() => {});
+      }
+    } catch (err: any) {
+      setAddError("Nie udało się zapisać umowy: " + (err.message || err));
+    }
+    setAddSaving(false);
+  }
+
+  async function handleDeleteContract(contract: Contract) {
+    setDeletingId(contract.id);
+    try {
+      if (contract.storagePath) {
+        try { await deleteObject(ref(storage, contract.storagePath)); } catch {}
+      }
+      await deleteDoc(doc(db, "contracts", contract.id));
+      setContracts((prev) => prev.filter((c) => c.id !== contract.id));
     } catch {}
-    setDeleting(null);
+    setDeletingId(null);
+    setDeleteConfirmId(null);
+  }
+
+  // Otwórz modal edycji z podstawionymi danymi
+  function openEditModal(contract: Contract) {
+    setEditContract(contract);
+    setEditForm({
+      employeeId: contract.employeeId,
+      employmentType: contract.employmentType || "umowa o pracę",
+      contractFrom: contract.contractFrom || "",
+      contractTo: contract.contractTo === "bezterminowa" ? "" : (contract.contractTo || ""),
+    });
+    // Jeśli umowa ma plik — pokaż go jako aktualny
+    setEditFile(
+      contract.fileUrl
+        ? { name: contract.fileName || "Plik umowy", url: contract.fileUrl, storagePath: contract.storagePath || "", type: contract.fileType || "pdf" }
+        : null
+    );
+    setEditError("");
+  }
+
+  async function pickEditFile() {
+    if (Platform.OS === "web") {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = ".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+      input.onchange = async (e: any) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        setEditUploading(true);
+        try {
+          const ext = file.name.split(".").pop()?.toLowerCase() || "pdf";
+          const storagePath = `contracts/${editForm.employeeId || "edit"}/${Date.now()}_${file.name}`;
+          const storageRef = ref(storage, storagePath);
+          await uploadBytes(storageRef, file);
+          const url = await getDownloadURL(storageRef);
+          setEditFile({ name: file.name, url, storagePath, type: ext });
+        } catch { setEditError("Nie udało się przesłać pliku."); }
+        setEditUploading(false);
+      };
+      input.click();
+    } else {
+      try {
+        const result = await DocumentPicker.getDocumentAsync({
+          type: ["application/pdf", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+          copyToCacheDirectory: true,
+          multiple: false,
+        });
+        if (result.canceled || !result.assets || result.assets.length === 0) return;
+        const asset = result.assets[0];
+        setEditUploading(true);
+        try {
+          const fileName = asset.name;
+          const ext = fileName.split(".").pop()?.toLowerCase() || "pdf";
+          const storagePath = `contracts/${editForm.employeeId || "edit"}/${Date.now()}_${fileName}`;
+          const storageRef = ref(storage, storagePath);
+          const base64 = await FileSystem.readAsStringAsync(asset.uri, { encoding: FileSystem.EncodingType.Base64 });
+          const bytes = base64ToUint8Array(base64);
+          const mimeType = asset.mimeType || "application/octet-stream";
+          await uploadBytes(storageRef, bytes, { contentType: mimeType });
+          const url = await getDownloadURL(storageRef);
+          setEditFile({ name: fileName, url, storagePath, type: ext });
+        } catch { setEditError("Nie udało się przesłać pliku."); }
+        setEditUploading(false);
+      } catch (err) { console.error("DocumentPicker error:", err); }
+    }
+  }
+
+  async function handleEditContract() {
+    if (!editContract) return;
+    if (!editForm.employeeId) { setEditError("Wybierz pracownika."); return; }
+    if (!editForm.contractFrom.trim()) { setEditError("Podaj datę początku umowy."); return; }
+    setEditError("");
+    setEditSaving(true);
+    try {
+      const emp = employees.find((e) => e.id === editForm.employeeId);
+      const employeeName = emp ? `${emp.firstName} ${emp.lastName}` : (editContract.employeeName || "");
+      const toDate = editForm.contractTo.trim() ? parseDate(editForm.contractTo.trim()) : null;
+      const isActive = !toDate || toDate >= new Date();
+
+      const updateData: any = {
+        employeeId: editForm.employeeId,
+        employeeName,
+        employmentType: editForm.employmentType,
+        contractFrom: editForm.contractFrom.trim(),
+        contractTo: editForm.contractTo.trim() || "bezterminowa",
+        isActive,
+        updatedAt: serverTimestamp(),
+      };
+
+      // Jeśli wybrano nowy plik — usuń stary ze Storage (jeśli inny) i zapisz nowy
+      if (editFile && editFile.url !== editContract.fileUrl) {
+        // Usuń stary plik ze Storage jeśli istnieje i jest inny
+        if (editContract.storagePath && editContract.storagePath !== editFile.storagePath) {
+          try { await deleteObject(ref(storage, editContract.storagePath)); } catch {}
+        }
+        updateData.fileUrl = editFile.url;
+        updateData.fileName = editFile.name;
+        updateData.storagePath = editFile.storagePath;
+        updateData.fileType = editFile.type;
+      } else if (!editFile) {
+        // Admin usunął plik — wyczyść pola pliku
+        if (editContract.storagePath) {
+          try { await deleteObject(ref(storage, editContract.storagePath)); } catch {}
+        }
+        updateData.fileUrl = null;
+        updateData.fileName = null;
+        updateData.storagePath = null;
+        updateData.fileType = null;
+      }
+      // Jeśli editFile === stary plik (url się nie zmienił) — nie ruszaj Storage
+
+      await updateDoc(doc(db, "contracts", editContract.id), updateData);
+
+      // Zaktualizuj lokalny stan
+      setContracts((prev) =>
+        prev.map((c) =>
+          c.id === editContract.id
+            ? { ...c, ...updateData, updatedAt: new Date() }
+            : c
+        )
+      );
+      setEditContract(null);
+    } catch (err: any) {
+      setEditError("Nie udało się zaktualizować umowy: " + (err.message || err));
+    }
+    setEditSaving(false);
   }
 
   function openFile(url: string) {
     if (Platform.OS === "web") {
       window.open(url, "_blank");
     } else {
-      // Android / iOS: otwórz URL w przeglądarce
       import("expo-linking").then(({ openURL }) => openURL(url)).catch(() => {});
     }
   }
 
-  function getFileIcon(type: string) {
+  function getFileIcon(type?: string) {
     if (type === "pdf") return "📄";
     if (type === "doc" || type === "docx") return "📝";
     return "📎";
   }
 
-  // Posortuj pracowników — kończące się umowy na górze
-  const sorted = [...employees].sort((a, b) => {
-    const da = daysUntil(a.contractTo);
-    const db2 = daysUntil(b.contractTo);
-    if (da === null && db2 === null) return 0;
-    if (da === null) return 1;
-    if (db2 === null) return -1;
-    return da - db2;
+  // Pogrupuj umowy po pracowniku
+  const byEmployee: Record<string, Contract[]> = {};
+  contracts.forEach((c) => {
+    if (!byEmployee[c.employeeId]) byEmployee[c.employeeId] = [];
+    byEmployee[c.employeeId].push(c);
   });
 
-  const expiringSoon = sorted.filter((e) => {
-    const d = daysUntil(e.contractTo);
+  // Kończące się umowy (aktywne, do 30 dni)
+  const expiringSoon = contracts.filter((c) => {
+    if (!c.isActive) return false;
+    const d = daysUntil(c.contractTo);
     return d !== null && d >= 0 && d <= 30;
   });
 
   return (
-    <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 20 }}>
-      {/* Sekcja kończących się umów */}
-      {expiringSoon.length > 0 && (
-        <View style={ct.alertSection}>
-          <Text style={ct.alertTitle}>⚠️ Kończące się umowy (30 dni)</Text>
-          {expiringSoon.map((emp) => {
-            const days = daysUntil(emp.contractTo);
-            const color = urgencyColor(days);
-            return (
-              <View key={emp.id} style={ct.alertRow}>
-                <View style={{ flex: 1 }}>
-                  <Text style={ct.alertName}>{emp.firstName} {emp.lastName}</Text>
-                  <Text style={ct.alertSub}>{emp.employmentType || "—"} · do: {formatDate(emp.contractTo)}</Text>
-                </View>
-                <View style={[ct.daysBadge, { backgroundColor: `${color}22`, borderColor: `${color}66` }]}>
-                  <Text style={[ct.daysBadgeText, { color }]}>{days} dni</Text>
-                </View>
-              </View>
-            );
-          })}
-        </View>
-      )}
+    <View style={{ flex: 1 }}>
+      {/* Przycisk Dodaj umowę */}
+      <View style={ct.addContractBar}>
+        <TouchableOpacity style={ct.addContractBtn} onPress={() => { setShowAddModal(true); setAddForm({ ...EMPTY_CONTRACT_FORM }); setAddFile(null); setAddError(""); }}>
+          <Text style={ct.addContractBtnText}>+ Dodaj umowę</Text>
+        </TouchableOpacity>
+      </View>
 
-      {/* Lista wszystkich pracowników z umowami */}
-      <Text style={ct.listTitle}>📋 Wszystkie umowy</Text>
-      {employees.length === 0 ? (
-        <View style={s.emptyWrap}>
-          <Text style={s.emptyIcon}>📋</Text>
-          <Text style={s.emptyTitle}>Brak danych umów</Text>
-          <Text style={s.emptyDesc}>Dodaj pracowników z danymi umowy</Text>
-        </View>
-      ) : (
-        sorted.map((emp) => {
-          const days = daysUntil(emp.contractTo);
-          const color = urgencyColor(days);
-          const fullName = `${emp.firstName || ""} ${emp.lastName || ""}`.trim() || "—";
-          const files = contractFiles[emp.id] || [];
-          return (
-            <View key={emp.id} style={ct.contractCard}>
-              <View style={ct.contractTop}>
-                <View style={ct.contractAvatar}>
-                  <Text style={ct.contractAvatarText}>
-                    {(emp.firstName?.[0] || "?").toUpperCase()}
-                    {(emp.lastName?.[0] || "").toUpperCase()}
-                  </Text>
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={ct.contractName}>{fullName}</Text>
-                  <Text style={ct.contractRole}>{emp.workType || "—"}</Text>
-                </View>
-                {days !== null && (
+      <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 20 }}>
+        {/* Kończące się umowy */}
+        {expiringSoon.length > 0 && (
+          <View style={ct.alertSection}>
+            <Text style={ct.alertTitle}>⚠️ Kończące się umowy (30 dni)</Text>
+            {expiringSoon.map((c) => {
+              const days = daysUntil(c.contractTo);
+              const color = urgencyColor(days);
+              return (
+                <View key={c.id} style={ct.alertRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={ct.alertName}>{c.employeeName || c.employeeId}</Text>
+                    <Text style={ct.alertSub}>{c.employmentType} · do: {formatDate(c.contractTo)}</Text>
+                  </View>
                   <View style={[ct.daysBadge, { backgroundColor: `${color}22`, borderColor: `${color}66` }]}>
-                    <Text style={[ct.daysBadgeText, { color }]}>
-                      {days < 0 ? "Wygasła" : `${days} dni`}
+                    <Text style={[ct.daysBadgeText, { color }]}>{days} dni</Text>
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+        )}
+
+        {/* Lista umów */}
+        <Text style={ct.listTitle}>📋 Wszystkie umowy ({contracts.length})</Text>
+        {loadingContracts ? (
+          <ActivityIndicator size="small" color="#F5A623" style={{ marginTop: 20 }} />
+        ) : contracts.length === 0 ? (
+          <View style={s.emptyWrap}>
+            <Text style={s.emptyIcon}>📋</Text>
+            <Text style={s.emptyTitle}>Brak umów</Text>
+            <Text style={s.emptyDesc}>Dodaj pierwszą umowę klikając "+ Dodaj umowę"</Text>
+          </View>
+        ) : (
+          contracts.map((c) => {
+            const days = daysUntil(c.contractTo);
+            const color = urgencyColor(days);
+            const emp = employees.find((e) => e.id === c.employeeId);
+            const fullName = c.employeeName || (emp ? `${emp.firstName} ${emp.lastName}` : c.employeeId);
+            return (
+              <View key={c.id} style={[ct.contractCard, !c.isActive && { opacity: 0.65 }]}>
+                <View style={ct.contractTop}>
+                  <View style={ct.contractAvatar}>
+                    <Text style={ct.contractAvatarText}>
+                      {(fullName[0] || "?").toUpperCase()}
+                      {(fullName.split(" ")[1]?.[0] || "").toUpperCase()}
                     </Text>
                   </View>
-                )}
-              </View>
-              <View style={ct.contractDetails}>
-                <View style={ct.contractRow}>
-                  <Text style={ct.contractLabel}>Rodzaj umowy</Text>
-                  <Text style={ct.contractValue}>{emp.employmentType || "—"}</Text>
+                  <View style={{ flex: 1 }}>
+                    <Text style={ct.contractName}>{fullName}</Text>
+                    <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap" }}>
+                      <View style={[ct.statusBadge, c.isActive ? ct.statusActive : ct.statusArchived]}>
+                        <Text style={[ct.statusBadgeText, c.isActive ? { color: "#4ADE80" } : { color: "#8899AA" }]}>
+                          {c.isActive ? "Aktywna" : "Archiwum"}
+                        </Text>
+                      </View>
+                    </View>
+                  </View>
+                  {days !== null && c.isActive && (
+                    <View style={[ct.daysBadge, { backgroundColor: `${color}22`, borderColor: `${color}66` }]}>
+                      <Text style={[ct.daysBadgeText, { color }]}>
+                        {days < 0 ? "Wygasła" : `${days} dni`}
+                      </Text>
+                    </View>
+                  )}
                 </View>
-                <View style={ct.contractRow}>
-                  <Text style={ct.contractLabel}>Od</Text>
-                  <Text style={ct.contractValue}>{formatDate(emp.contractFrom) || "—"}</Text>
+                <View style={ct.contractDetails}>
+                  <View style={ct.contractRow}>
+                    <Text style={ct.contractLabel}>Rodzaj umowy</Text>
+                    <Text style={ct.contractValue}>{c.employmentType || "—"}</Text>
+                  </View>
+                  <View style={ct.contractRow}>
+                    <Text style={ct.contractLabel}>Od</Text>
+                    <Text style={ct.contractValue}>{formatDate(c.contractFrom) || "—"}</Text>
+                  </View>
+                  <View style={ct.contractRow}>
+                    <Text style={ct.contractLabel}>Do</Text>
+                    <Text style={[ct.contractValue, days !== null && days <= 30 && c.isActive && { color, fontWeight: "700" }]}>
+                      {c.contractTo === "bezterminowa" ? "Bezterminowa" : formatDate(c.contractTo)}
+                    </Text>
+                  </View>
                 </View>
-                <View style={ct.contractRow}>
-                  <Text style={ct.contractLabel}>Do</Text>
-                  <Text style={[
-                    ct.contractValue,
-                    days !== null && days <= 30 && { color, fontWeight: "700" },
-                  ]}>
-                    {emp.contractTo ? formatDate(emp.contractTo) : "Bezterminowa"}
-                  </Text>
-                </View>
-              </View>
-
-              {/* Sekcja plików umowy */}
-              <View style={ct.filesSection}>
-                <View style={ct.filesHeader}>
-                  <Text style={ct.filesTitle}>📎 Pliki umowy</Text>
+                {/* Plik umowy */}
+                {c.fileUrl ? (
+                  <View style={ct.filesSection}>
+                    <TouchableOpacity style={ct.fileRow} onPress={() => openFile(c.fileUrl!)}>
+                      <Text style={ct.fileIcon}>{getFileIcon(c.fileType)}</Text>
+                      <View style={{ flex: 1 }}>
+                        <Text style={ct.fileName} numberOfLines={1}>{c.fileName || "Plik umowy"}</Text>
+                        <Text style={ct.fileType}>{c.fileType?.toUpperCase()}</Text>
+                      </View>
+                      <Text style={{ color: "#F5A623", fontSize: 12, fontWeight: "700" }}>Otwórz →</Text>
+                    </TouchableOpacity>
+                  </View>
+                ) : null}
+                {/* Przyciski akcji */}
+                <View style={ct.contractActionRow}>
                   <TouchableOpacity
-                    style={ct.uploadBtn}
-                    onPress={() => triggerUpload(emp.id)}
-                    disabled={uploading === emp.id}
+                    style={ct.editContractBtn}
+                    onPress={() => openEditModal(c)}
                   >
-                    {uploading === emp.id ? (
-                      <ActivityIndicator size="small" color="#F5A623" />
+                    <Text style={ct.editContractBtnText}>✏️ Edytuj</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={ct.deleteContractBtn}
+                    onPress={() => setDeleteConfirmId(c.id)}
+                    disabled={deletingId === c.id}
+                  >
+                    {deletingId === c.id ? (
+                      <ActivityIndicator size="small" color="#F87171" />
                     ) : (
-                      <Text style={ct.uploadBtnText}>+ Dodaj plik</Text>
+                      <Text style={ct.deleteContractBtnText}>🗑 Usuń</Text>
                     )}
                   </TouchableOpacity>
                 </View>
-                {files.length === 0 ? (
-                  <Text style={ct.noFilesText}>Brak plików umowy</Text>
-                ) : (
-                  files.map((file) => (
-                    <View key={file.id} style={ct.fileRow}>
-                      <Text style={ct.fileIcon}>{getFileIcon(file.fileType)}</Text>
-                      <TouchableOpacity
-                        style={{ flex: 1 }}
-                        onPress={() => openFile(file.fileUrl)}
-                      >
-                        <Text style={ct.fileName} numberOfLines={1}>{file.fileName}</Text>
-                        <Text style={ct.fileType}>{file.fileType?.toUpperCase()}</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={ct.deleteFileBtn}
-                        onPress={() => deleteFile(file)}
-                        disabled={deleting === file.id}
-                      >
-                        {deleting === file.id ? (
-                          <ActivityIndicator size="small" color="#F87171" />
-                        ) : (
-                          <Text style={ct.deleteFileBtnText}>🗑</Text>
-                        )}
-                      </TouchableOpacity>
-                    </View>
-                  ))
-                )}
               </View>
+            );
+          })
+        )}
+      </ScrollView>
+
+      {/* Modal potwierdzenia usunięcia */}
+      <Modal visible={!!deleteConfirmId} transparent animationType="fade" onRequestClose={() => setDeleteConfirmId(null)}>
+        <View style={ct.modalOverlay}>
+          <View style={ct.modalBox}>
+            <Text style={ct.modalTitle}>Usuń umowę?</Text>
+            <Text style={ct.modalDesc}>Tej operacji nie można cofnąć. Plik zostanie również usunięty.</Text>
+            <View style={ct.modalBtns}>
+              <TouchableOpacity style={ct.modalCancelBtn} onPress={() => setDeleteConfirmId(null)}>
+                <Text style={ct.modalCancelText}>Anuluj</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={ct.modalDeleteBtn}
+                onPress={() => {
+                  const c = contracts.find((x) => x.id === deleteConfirmId);
+                  if (c) handleDeleteContract(c);
+                }}
+              >
+                <Text style={ct.modalDeleteText}>Usuń</Text>
+              </TouchableOpacity>
             </View>
-          );
-        })
-      )}
-    </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Modal dodawania umowy */}
+      <Modal visible={showAddModal} animationType="slide" transparent={false} onRequestClose={() => setShowAddModal(false)}>
+        <KeyboardAvoidingView style={{ flex: 1, backgroundColor: "#0D1B2A" }} behavior={Platform.OS === "ios" ? "padding" : "height"}>
+          <View style={ms.modalHeader}>
+            <Text style={ms.modalTitle}>Dodaj umowę</Text>
+            <TouchableOpacity onPress={() => setShowAddModal(false)} style={ms.closeBtn}>
+              <Text style={ms.closeBtnText}>✕</Text>
+            </TouchableOpacity>
+          </View>
+          <ScrollView style={ms.scroll} contentContainerStyle={ms.scrollContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+            {addError ? (
+              <View style={ms.errorBox}><Text style={ms.errorText}>⚠️ {addError}</Text></View>
+            ) : null}
+
+            {/* Wybór pracownika */}
+            <Text style={ct.addFormLabel}>Pracownik *</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 12 }}>
+              {employees.map((emp) => (
+                <TouchableOpacity
+                  key={emp.id}
+                  style={[ct.empChip, addForm.employeeId === emp.id && ct.empChipActive]}
+                  onPress={() => setAddField("employeeId", emp.id)}
+                >
+                  <Text style={[ct.empChipText, addForm.employeeId === emp.id && ct.empChipTextActive]}>
+                    {emp.firstName} {emp.lastName}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+
+            {/* Rodzaj umowy */}
+            <Text style={ct.addFormLabel}>Rodzaj umowy *</Text>
+            <View style={ct.empChipRow}>
+              {EMPLOYMENT_OPTIONS.map((opt) => (
+                <TouchableOpacity
+                  key={opt}
+                  style={[ct.empChip, addForm.employmentType === opt && ct.empChipActive]}
+                  onPress={() => setAddField("employmentType", opt)}
+                >
+                  <Text style={[ct.empChipText, addForm.employmentType === opt && ct.empChipTextActive]}>{opt}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {/* Daty */}
+            <FormField
+              label="Umowa od *"
+              value={addForm.contractFrom}
+              onChangeText={(v) => setAddField("contractFrom", v)}
+              placeholder="DD.MM.RRRR"
+            />
+            <FormField
+              label="Umowa do (puste = bezterminowa)"
+              value={addForm.contractTo}
+              onChangeText={(v) => setAddField("contractTo", v)}
+              placeholder="DD.MM.RRRR lub zostaw puste"
+            />
+
+            {/* Plik umowy */}
+            <Text style={ct.addFormLabel}>Plik umowy (opcjonalnie)</Text>
+            <TouchableOpacity
+              style={ct.uploadBtn}
+              onPress={pickFile}
+              disabled={uploading}
+            >
+              {uploading ? (
+                <ActivityIndicator size="small" color="#F5A623" />
+              ) : addFile ? (
+                <Text style={ct.uploadBtnText}>✅ {addFile.name}</Text>
+              ) : (
+                <Text style={ct.uploadBtnText}>+ Wybierz plik (PDF/DOC)</Text>
+              )}
+            </TouchableOpacity>
+
+            <View style={{ height: 20 }} />
+
+            <TouchableOpacity
+              style={[ms.saveBtn, addSaving && { opacity: 0.6 }]}
+              onPress={handleAddContract}
+              disabled={addSaving}
+            >
+              {addSaving ? (
+                <ActivityIndicator size="small" color="#0D1B2A" />
+              ) : (
+                <Text style={ms.saveBtnText}>Zapisz umowę</Text>
+              )}
+            </TouchableOpacity>
+            <View style={{ height: 30 }} />
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* Modal edycji umowy */}
+      <Modal visible={!!editContract} animationType="slide" transparent={false} onRequestClose={() => setEditContract(null)}>
+        <KeyboardAvoidingView style={{ flex: 1, backgroundColor: "#0D1B2A" }} behavior={Platform.OS === "ios" ? "padding" : "height"}>
+          <View style={ms.modalHeader}>
+            <Text style={ms.modalTitle}>✏️ Edytuj umowę</Text>
+            <TouchableOpacity onPress={() => setEditContract(null)} style={ms.closeBtn}>
+              <Text style={ms.closeBtnText}>✕</Text>
+            </TouchableOpacity>
+          </View>
+          <ScrollView style={ms.scroll} contentContainerStyle={ms.scrollContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+            {editError ? (
+              <View style={ms.errorBox}><Text style={ms.errorText}>⚠️ {editError}</Text></View>
+            ) : null}
+
+            {/* Wybór pracownika */}
+            <Text style={ct.addFormLabel}>Pracownik *</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 12 }}>
+              {employees.map((emp) => (
+                <TouchableOpacity
+                  key={emp.id}
+                  style={[ct.empChip, editForm.employeeId === emp.id && ct.empChipActive]}
+                  onPress={() => setEditForm((prev) => ({ ...prev, employeeId: emp.id }))}
+                >
+                  <Text style={[ct.empChipText, editForm.employeeId === emp.id && ct.empChipTextActive]}>
+                    {emp.firstName} {emp.lastName}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+
+            {/* Rodzaj umowy */}
+            <Text style={ct.addFormLabel}>Rodzaj umowy *</Text>
+            <View style={ct.empChipRow}>
+              {EMPLOYMENT_OPTIONS.map((opt) => (
+                <TouchableOpacity
+                  key={opt}
+                  style={[ct.empChip, editForm.employmentType === opt && ct.empChipActive]}
+                  onPress={() => setEditForm((prev) => ({ ...prev, employmentType: opt }))}
+                >
+                  <Text style={[ct.empChipText, editForm.employmentType === opt && ct.empChipTextActive]}>{opt}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {/* Daty */}
+            <FormField
+              label="Umowa od *"
+              value={editForm.contractFrom}
+              onChangeText={(v) => setEditForm((prev) => ({ ...prev, contractFrom: v }))}
+              placeholder="DD.MM.RRRR"
+            />
+            <FormField
+              label="Umowa do (puste = bezterminowa)"
+              value={editForm.contractTo}
+              onChangeText={(v) => setEditForm((prev) => ({ ...prev, contractTo: v }))}
+              placeholder="DD.MM.RRRR lub zostaw puste"
+            />
+
+            {/* Plik umowy */}
+            <Text style={ct.addFormLabel}>Plik umowy</Text>
+            <TouchableOpacity
+              style={ct.uploadBtn}
+              onPress={pickEditFile}
+              disabled={editUploading}
+            >
+              {editUploading ? (
+                <ActivityIndicator size="small" color="#F5A623" />
+              ) : editFile ? (
+                <Text style={ct.uploadBtnText}>✅ {editFile.name}</Text>
+              ) : (
+                <Text style={ct.uploadBtnText}>+ Wybierz plik (PDF/DOC)</Text>
+              )}
+            </TouchableOpacity>
+            {editFile && (
+              <TouchableOpacity
+                style={{ marginTop: 6, alignSelf: "flex-start" }}
+                onPress={() => setEditFile(null)}
+              >
+                <Text style={{ color: "#F87171", fontSize: 12 }}>✕ Usuń plik</Text>
+              </TouchableOpacity>
+            )}
+
+            <View style={{ height: 20 }} />
+
+            <TouchableOpacity
+              style={[ms.saveBtn, editSaving && { opacity: 0.6 }]}
+              onPress={handleEditContract}
+              disabled={editSaving}
+            >
+              {editSaving ? (
+                <ActivityIndicator size="small" color="#0D1B2A" />
+              ) : (
+                <Text style={ms.saveBtnText}>Zapisz zmiany</Text>
+              )}
+            </TouchableOpacity>
+            <View style={{ height: 30 }} />
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </Modal>
+    </View>
   );
 }
 
 // ─── Główny ekran Kadry ───────────────────────────────────────
 export default function KadryScreen() {
+  const params = useLocalSearchParams<{ tab?: string; leaveId?: string }>();
   const [activeTab, setActiveTab] = useState<"lista" | "grafik" | "urlopy" | "umowy">("lista");
+  const [pendingLeaveId, setPendingLeaveId] = useState<string | null>(null);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [loading, setLoading] = useState(true);
   const [showFormModal, setShowFormModal] = useState(false);
   const [editEmployee, setEditEmployee] = useState<Employee | null>(null);
   const [searchText, setSearchText] = useState("");
   const [deleteError, setDeleteError] = useState("");
+
+  // Obsługa parametrów URL (np. z powiadomień)
+  useEffect(() => {
+    if (params.tab === "urlopy") {
+      setActiveTab("urlopy");
+      if (params.leaveId) {
+        setPendingLeaveId(params.leaveId);
+      }
+    } else if (params.tab === "lista") {
+      setActiveTab("lista");
+    }
+  }, [params.tab, params.leaveId]);
 
   useEffect(() => {
     loadEmployees();
@@ -1511,13 +2085,76 @@ export default function KadryScreen() {
 
   async function handleDelete(emp: Employee) {
     try {
+      // 1. Usuń konto z Firebase Auth + users (przez adminAuth)
+      const uid = emp.uid;
+      if (uid) {
+        await deleteUserAccount(uid, emp.email);
+      } else {
+        // Brak uid w employees — szukaj w users po email
+        try {
+          const q = query(collection(db, "users"), where("email", "==", emp.email));
+          const snap = await getDocs(q);
+          for (const d of snap.docs) {
+            await deleteUserAccount(d.id, emp.email);
+          }
+        } catch (userErr) {
+          console.warn("[delete] Błąd szukania users po email:", userErr);
+        }
+      }
+
+      // 2. Usuń rekord z kolekcji employees
       await deleteDoc(doc(db, "employees", emp.id));
-      // Natychmiast usuń z lokalnego stanu (bez czekania na reload)
+
+      // 3. Usuń z lokalnego stanu natychmiast
       setEmployees((prev) => prev.filter((e) => e.id !== emp.id));
       // Odśwież z Firebase w tle
       loadEmployees();
     } catch (e: any) {
       setDeleteError("Nie udało się usunąć pracownika: " + e.message);
+    }
+  }
+
+  async function handleSuspend(emp: Employee) {
+    try {
+      const uid = emp.uid;
+      if (!uid) {
+        // Szukaj uid w users po email
+        const q = query(collection(db, "users"), where("email", "==", emp.email));
+        const snap = await getDocs(q);
+        for (const d of snap.docs) {
+          await suspendUserAccount(d.id);
+        }
+      } else {
+        await suspendUserAccount(uid);
+      }
+      // Zaktualizuj employees.suspended
+      await updateDoc(doc(db, "employees", emp.id), { suspended: true });
+      setEmployees((prev) =>
+        prev.map((e) => (e.id === emp.id ? { ...e, suspended: true } : e))
+      );
+    } catch (e: any) {
+      setDeleteError("Nie udało się zawiesić konta: " + e.message);
+    }
+  }
+
+  async function handleUnsuspend(emp: Employee) {
+    try {
+      const uid = emp.uid;
+      if (!uid) {
+        const q = query(collection(db, "users"), where("email", "==", emp.email));
+        const snap = await getDocs(q);
+        for (const d of snap.docs) {
+          await unsuspendUserAccount(d.id);
+        }
+      } else {
+        await unsuspendUserAccount(uid);
+      }
+      await updateDoc(doc(db, "employees", emp.id), { suspended: false });
+      setEmployees((prev) =>
+        prev.map((e) => (e.id === emp.id ? { ...e, suspended: false } : e))
+      );
+    } catch (e: any) {
+      setDeleteError("Nie udało się odwiesić konta: " + e.message);
     }
   }
 
@@ -1637,6 +2274,8 @@ export default function KadryScreen() {
                   emp={emp}
                   onEdit={() => openEdit(emp)}
                   onDelete={() => handleDelete(emp)}
+                  onSuspend={() => handleSuspend(emp)}
+                  onUnsuspend={() => handleUnsuspend(emp)}
                 />
               ))}
               <View style={{ height: 20 }} />
@@ -1646,7 +2285,7 @@ export default function KadryScreen() {
       )}
 
       {activeTab === "grafik" && <GrafikTab employees={employees} />}
-      {activeTab === "urlopy" && <UrlopTab />}
+      {activeTab === "urlopy" && <UrlopTab initialLeaveId={pendingLeaveId} onLeaveOpened={() => setPendingLeaveId(null)} />}
       {activeTab === "umowy" && <UmowyTab employees={employees} />}
 
       {/* Dolna nawigacja */}
@@ -1780,6 +2419,22 @@ const s = StyleSheet.create({
   },
   statusDot: { width: 6, height: 6, borderRadius: 3 },
   statusText: { fontSize: 11, fontWeight: "700" },
+  suspendBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 8,
+    backgroundColor: "rgba(251,191,36,0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(251,191,36,0.3)",
+    justifyContent: "center",
+    alignItems: "center",
+    marginRight: 4,
+  },
+  suspendBtnActive: {
+    backgroundColor: "rgba(74,222,128,0.1)",
+    borderColor: "rgba(74,222,128,0.3)",
+  },
+  suspendBtnText: { fontSize: 16 },
   deleteBtn: {
     width: 34,
     height: 34,
@@ -2324,6 +2979,57 @@ const ut = StyleSheet.create({
     fontSize: 12,
     fontWeight: "600",
   },
+  docSection: {
+    backgroundColor: "#162030",
+    borderRadius: 14,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: "#1E2D3D",
+    marginBottom: 12,
+  },
+  docSectionTitle: {
+    color: "#F5A623",
+    fontSize: 13,
+    fontWeight: "700",
+    marginBottom: 10,
+  },
+  docBtnRow: {
+    flexDirection: "row",
+    gap: 10,
+  },
+  docPreviewBtn: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 10,
+    alignItems: "center",
+    backgroundColor: "rgba(245,166,35,0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(245,166,35,0.35)",
+  },
+  docPreviewBtnText: {
+    color: "#F5A623",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  docDownloadBtn: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 10,
+    alignItems: "center",
+    backgroundColor: "rgba(74,222,128,0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(74,222,128,0.35)",
+  },
+  docDownloadBtnText: {
+    color: "#4ADE80",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  docMissing: {
+    color: "#8899AA",
+    fontSize: 12,
+    fontStyle: "italic",
+  },
 });
 
 // ─── Style zakładki Umowy ─────────────────────────────────────
@@ -2436,4 +3142,108 @@ const ct = StyleSheet.create({
     alignItems: "center",
   },
   deleteFileBtnText: { fontSize: 14 },
+  // Nowe style dla UmowyTab
+  addContractBar: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: "#1E2D3D",
+  },
+  addContractBtn: {
+    backgroundColor: "#F5A623",
+    borderRadius: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 9,
+  },
+  addContractBtnText: { color: "#0D1B2A", fontSize: 13, fontWeight: "800" },
+  statusBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    borderWidth: 1,
+  },
+  statusActive: { backgroundColor: "rgba(74,222,128,0.1)", borderColor: "rgba(74,222,128,0.3)" },
+  statusArchived: { backgroundColor: "rgba(136,153,170,0.1)", borderColor: "rgba(136,153,170,0.3)" },
+  statusBadgeText: { fontSize: 10, fontWeight: "700" },
+  contractActionRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginTop: 10,
+  },
+  editContractBtn: {
+    flex: 1,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "rgba(245,166,35,0.4)",
+    backgroundColor: "rgba(245,166,35,0.1)",
+    alignItems: "center",
+  },
+  editContractBtnText: { color: "#F5A623", fontSize: 12, fontWeight: "700" },
+  deleteContractBtn: {
+    flex: 1,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "rgba(248,113,113,0.3)",
+    backgroundColor: "rgba(248,113,113,0.08)",
+    alignItems: "center",
+  },
+  deleteContractBtnText: { color: "#F87171", fontSize: 12, fontWeight: "700" },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 20,
+  },
+  modalBox: {
+    backgroundColor: "#162030",
+    borderRadius: 16,
+    padding: 24,
+    width: "100%",
+    maxWidth: 360,
+    borderWidth: 1,
+    borderColor: "#1E2D3D",
+  },
+  modalTitle: { color: "#FFFFFF", fontSize: 16, fontWeight: "800", marginBottom: 8 },
+  modalDesc: { color: "#8899AA", fontSize: 13, marginBottom: 20 },
+  modalBtns: { flexDirection: "row", gap: 10 },
+  modalCancelBtn: {
+    flex: 1,
+    paddingVertical: 11,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#2A3A4A",
+    alignItems: "center",
+  },
+  modalCancelText: { color: "#8899AA", fontSize: 14, fontWeight: "700" },
+  modalDeleteBtn: {
+    flex: 1,
+    paddingVertical: 11,
+    borderRadius: 10,
+    backgroundColor: "#F87171",
+    alignItems: "center",
+  },
+  modalDeleteText: { color: "#FFFFFF", fontSize: 14, fontWeight: "800" },
+  addFormLabel: { color: "#8899AA", fontSize: 12, fontWeight: "700", marginBottom: 6 },
+  empChipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 12 },
+  empChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#2A3A4A",
+    backgroundColor: "#162030",
+    marginRight: 6,
+    marginBottom: 6,
+  },
+  empChipActive: {
+    borderColor: "#F5A623",
+    backgroundColor: "rgba(245,166,35,0.15)",
+  },
+  empChipText: { color: "#8899AA", fontSize: 12 },
+  empChipTextActive: { color: "#F5A623", fontWeight: "700" },
 });

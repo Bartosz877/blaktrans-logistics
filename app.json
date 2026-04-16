@@ -42,6 +42,14 @@
         {
           "photosPermission": "Aplikacja potrzebuje dostępu do zdjęć."
         }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#F5A623",
+          "sounds": []
+        }
       ]
     ],
     "experiments": {

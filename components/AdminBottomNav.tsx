@@ -51,16 +51,16 @@ const s = StyleSheet.create({
     backgroundColor: "#1B2838",
     borderTopWidth: 1,
     borderTopColor: "#2A3A4A",
-    paddingTop: 10,
+    paddingTop: 8,
     // paddingBottom ustawiane dynamicznie przez useSafeAreaInsets
   },
   navItem: {
     flex: 1,
     alignItems: "center",
-    paddingVertical: 4,
+    paddingVertical: 3,
   },
-  navIcon: { fontSize: 20, marginBottom: 2, opacity: 0.45 },
+  navIcon: { fontSize: 18, marginBottom: 1, opacity: 0.45 },
   navIconActive: { opacity: 1 },
-  navLabel: { fontSize: 10, color: "#687076", fontWeight: "600" },
+  navLabel: { fontSize: 9, color: "#687076", fontWeight: "600" },
   navLabelActive: { color: "#F5A623" },
 });

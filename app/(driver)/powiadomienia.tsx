@@ -22,10 +22,10 @@ import {
   where,
 } from "firebase/firestore";
 import { db } from "../../lib/firebase";
-import AdminHeader from "../../components/AdminHeader";
-import AdminBottomNav from "../../components/AdminBottomNav";
+import DriverHeader from "../../components/DriverHeader";
 import { useRouter } from "expo-router";
 import { useAuth } from "../_layout";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 interface Notification {
   id: string;
@@ -39,6 +39,8 @@ interface Notification {
   createdAt: any;
   leaveRequestId?: string;
   forRole?: string;
+  userId?: string;
+  recipientId?: string;
 }
 
 function typeIcon(type: string): string {
@@ -114,27 +116,36 @@ function DeleteConfirmModal({
 export default function PowiadomieniaScreen() {
   const router = useRouter();
   const { user } = useAuth();
+  const insets = useSafeAreaInsets();
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [loading, setLoading] = useState(true);
   const [deleteTarget, setDeleteTarget] = useState<Notification | null>(null);
   const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
-    // Admin widzi TYLKO powiadomienia forRole=admin
+    if (!user?.uid) return;
+    // Kierowca / Dygacz widzi TYLKO swoje powiadomienia (forRole=driver + recipientId lub userId)
     const q = query(
       collection(db, "notifications"),
-      where("forRole", "==", "admin"),
+      where("forRole", "==", "driver"),
       orderBy("createdAt", "desc")
     );
     const unsub = onSnapshot(q, (snap) => {
-      setNotifications(snap.docs.map((d) => ({ id: d.id, ...d.data() } as Notification)));
+      const all = snap.docs.map((d) => ({ id: d.id, ...d.data() } as Notification));
+      // Filtruj: tylko powiadomienia z recipientId === uid lub userId === uid
+      const filtered = all.filter((n) => {
+        if (n.recipientId) return n.recipientId === user!.uid;
+        if (n.userId) return n.userId === user!.uid;
+        return false; // broadcast bez adresata - nie pokazuj
+      });
+      setNotifications(filtered);
       setLoading(false);
     }, (err) => {
       console.warn("[powiadomienia] Błąd zapytania:", err);
       setLoading(false);
     });
     return () => unsub();
-  }, []);
+  }, [user?.uid]);
 
   async function markRead(id: string) {
     try {
@@ -171,36 +182,33 @@ export default function PowiadomieniaScreen() {
   function handleNotificationPress(n: Notification) {
     markRead(n.id);
     switch (n.type) {
-      case "leave_request":
       case "leave_approved":
-      case "leave_rejected": {
+      case "leave_rejected":
+      case "leave_request": {
         const leaveId = n.leaveRequestId;
         if (leaveId) {
-          router.push(`/(admin)/kadry?tab=urlopy&leaveId=${leaveId}` as any);
+          router.push(`/(driver)/sprawy?leaveId=${leaveId}` as any);
         } else {
-          router.push("/(admin)/kadry?tab=urlopy" as any);
+          router.push("/(driver)/sprawy" as any);
         }
         break;
       }
-      case "fault_report":
-        router.push("/(admin)/pojazdy" as any);
+      case "contract_added": {
+        // Przekieruj do ekranu umowy pracownika
+        router.push("/(driver)/umowa" as any);
         break;
-      case "employee_added":
-        router.push("/(admin)/kadry?tab=lista" as any);
-        break;
-      case "mileage_entry":
-        router.push("/(admin)/tachograf" as any);
-        break;
+      }
       default:
         break;
     }
   }
 
   const unreadCount = notifications.filter((n) => !n.read).length;
+  const bottomPad = Math.max(insets.bottom, 8);
 
   return (
     <View style={s.container}>
-      <AdminHeader />
+      <DriverHeader />
       <View style={s.topBar}>
         <TouchableOpacity onPress={() => router.back()} style={s.backBtn}>
           <Text style={s.backBtnText}>← Wróć</Text>
@@ -221,7 +229,10 @@ export default function PowiadomieniaScreen() {
           <Text style={s.emptyText}>Brak powiadomień</Text>
         </View>
       ) : (
-        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 20 }}>
+        <ScrollView
+          style={{ flex: 1 }}
+          contentContainerStyle={{ padding: 16, paddingBottom: bottomPad + 16 }}
+        >
           {notifications.map((n) => (
             <View key={n.id} style={[s.card, !n.read && s.cardUnread]}>
               <TouchableOpacity
@@ -249,8 +260,8 @@ export default function PowiadomieniaScreen() {
                     )}
                     <Text style={s.metaDate}>{formatDate(n.createdAt)}</Text>
                   </View>
-                  {(n.type === "leave_request" || n.type === "leave_approved" || n.type === "leave_rejected") && (
-                    <Text style={s.tapHint}>Dotknij, aby przejść do wniosku →</Text>
+                  {(n.type === "leave_approved" || n.type === "leave_rejected") && (
+                    <Text style={s.tapHint}>Dotknij, aby zobaczyć wniosek →</Text>
                   )}
                 </View>
               </TouchableOpacity>
@@ -267,7 +278,6 @@ export default function PowiadomieniaScreen() {
           ))}
         </ScrollView>
       )}
-      <AdminBottomNav />
 
       {/* Modal potwierdzenia usunięcia */}
       <DeleteConfirmModal

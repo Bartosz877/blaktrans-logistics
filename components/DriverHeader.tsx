@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import {
   View,
   Text,
@@ -7,35 +7,42 @@ import {
   Modal,
   Pressable,
   Platform,
-  StatusBar,
 } from "react-native";
 import { router } from "expo-router";
 import { collection, query, where, onSnapshot } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { useAuth } from "../app/_layout";
 import { logout } from "../lib/auth";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-interface AdminHeaderProps {
-  pageTitle?: string;
-}
-
-export default function AdminHeader({ pageTitle }: AdminHeaderProps) {
+export default function DriverHeader() {
   const { user, setUser } = useAuth();
+  const insets = useSafeAreaInsets();
   const [menuVisible, setMenuVisible] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
 
-  // Subskrybuj nieprzeczytane powiadomienia TYLKO dla admina
+  // Subskrybuj nieprzeczytane powiadomienia TYLKO dla tego użytkownika (forRole=driver + recipientId)
   useEffect(() => {
+    if (!user?.uid) return;
     const q = query(
       collection(db, "notifications"),
       where("read", "==", false),
-      where("forRole", "==", "admin")
+      where("forRole", "==", "driver")
     );
     const unsub = onSnapshot(q, (snap) => {
-      setUnreadCount(snap.size);
+      // Filtruj po stronie klienta: osobiste (recipientId) lub broadcast (brak recipientId/userId)
+      const count = snap.docs.filter((d) => {
+        const data = d.data();
+        if (data.recipientId) return data.recipientId === user!.uid;
+        if (data.userId) return data.userId === user!.uid;
+        return false; // broadcast bez adresata - nie licz
+      }).length;
+      setUnreadCount(count);
+    }, (err) => {
+      console.warn("[DriverHeader] Błąd badge:", err);
     });
     return () => unsub();
-  }, []);
+  }, [user?.uid]);
 
   async function handleLogout() {
     setMenuVisible(false);
@@ -48,58 +55,71 @@ export default function AdminHeader({ pageTitle }: AdminHeaderProps) {
 
   function handleProfile() {
     setMenuVisible(false);
-    router.push("/(admin)/profil");
-  }
-
-  function handleInbox() {
-    setMenuVisible(false);
-    router.push("/(admin)/czat");
+    router.push("/(driver)/profil" as any);
   }
 
   function handleNotifications() {
-    router.push("/(admin)/powiadomienia");
+    setMenuVisible(false);
+    router.push("/(driver)/powiadomienia" as any);
   }
 
-  const displayName = user?.name || user?.email || "Administrator";
+  function handleChat() {
+    router.push("/(driver)/czat" as any);
+  }
 
-  const topPadding = Platform.select({
-    android: (StatusBar.currentHeight ?? 24) + 8,
-    web: 14,
-    ios: 50,
-    default: 14,
+  const displayName = user?.name || user?.email || "Użytkownik";
+
+  // Oblicz label i kolor roli
+  const roleInfo = (() => {
+    const r = (user?.role || "").toLowerCase();
+    if (r === "administrator" || r === "admin") {
+      return { label: "Administrator", color: "#F87171", bg: "rgba(220,38,38,0.15)", border: "rgba(220,38,38,0.4)" };
+    }
+    if (r === "dygacz") {
+      return { label: "Dygacz", color: "#F472B6", bg: "rgba(244,114,182,0.15)", border: "rgba(244,114,182,0.4)" };
+    }
+    // DRIVER, driver, Kierowca — niebieski
+    return { label: "Kierowca", color: "#60A5FA", bg: "rgba(96,165,250,0.15)", border: "rgba(96,165,250,0.4)" };
+  })();
+
+  // Używaj safe area insets zamiast StatusBar.currentHeight
+  const topPad = Platform.select({
+    web: 10,
+    ios: insets.top > 0 ? insets.top : 44,
+    default: insets.top > 0 ? insets.top : 24,
   });
 
   return (
     <>
-      <View style={[s.header, { paddingTop: topPadding }]}>
-        {/* Lewa strona */}
+      <View style={[s.header, { paddingTop: topPad }]}>
+        {/* Lewa strona — kompaktowa */}
         <View style={s.left}>
-          <Text style={s.greeting}>Witaj,</Text>
-          <Text style={s.name} numberOfLines={1} ellipsizeMode="tail">
-            {displayName}
-          </Text>
+          <View style={s.nameRow}>
+            <Text style={s.greeting}>Witaj, </Text>
+            <Text style={s.name} numberOfLines={1} ellipsizeMode="tail">
+              {displayName}
+            </Text>
+          </View>
           <View style={s.badgesRow}>
             <View style={s.activeBadge}>
               <Text style={s.activeBadgeText}>● Aktywny</Text>
             </View>
-            <View style={s.adminBadge}>
-              <Text style={s.adminBadgeText}>Administrator</Text>
+            <View style={[s.roleBadge, { backgroundColor: roleInfo.bg, borderColor: roleInfo.border }]}>
+              <Text style={[s.roleBadgeText, { color: roleInfo.color }]}>{roleInfo.label}</Text>
             </View>
           </View>
         </View>
 
         {/* Prawa strona: 3 ikony */}
         <View style={s.iconsRow}>
-          {/* Czat */}
           <TouchableOpacity
             style={s.iconBtn}
-            onPress={handleInbox}
+            onPress={handleChat}
             hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
           >
             <Text style={s.iconText}>💬</Text>
           </TouchableOpacity>
 
-          {/* Powiadomienia z badge */}
           <TouchableOpacity
             style={s.iconBtn}
             onPress={handleNotifications}
@@ -115,7 +135,6 @@ export default function AdminHeader({ pageTitle }: AdminHeaderProps) {
             )}
           </TouchableOpacity>
 
-          {/* Menu */}
           <TouchableOpacity
             style={s.iconBtn}
             onPress={() => setMenuVisible(true)}
@@ -164,7 +183,7 @@ const s = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
     paddingHorizontal: 16,
-    paddingBottom: 12,
+    paddingBottom: 10,
     backgroundColor: "#1B2838",
     borderBottomWidth: 1,
     borderBottomColor: "#2A3A4A",
@@ -174,61 +193,65 @@ const s = StyleSheet.create({
     marginRight: 8,
     minWidth: 0,
   },
+  nameRow: {
+    flexDirection: "row",
+    alignItems: "baseline",
+    flexWrap: "nowrap",
+    overflow: "hidden",
+  },
   greeting: {
     color: "#8899AA",
     fontSize: 12,
     fontWeight: "500",
-    lineHeight: 16,
   },
   name: {
     color: "#FFFFFF",
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: "700",
-    lineHeight: 21,
-    marginTop: 1,
+    flexShrink: 1,
   },
   badgesRow: {
     flexDirection: "row",
-    gap: 6,
-    marginTop: 5,
+    gap: 5,
+    marginTop: 4,
     flexWrap: "wrap",
   },
   activeBadge: {
     backgroundColor: "rgba(74,222,128,0.15)",
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 5,
     borderWidth: 1,
     borderColor: "rgba(74,222,128,0.35)",
   },
   activeBadgeText: {
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: "700",
     color: "#4ADE80",
   },
-  adminBadge: {
-    backgroundColor: "rgba(220,38,38,0.15)",
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6,
+  roleBadge: {
+    backgroundColor: "rgba(245,166,35,0.15)",
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 5,
     borderWidth: 1,
-    borderColor: "rgba(220,38,38,0.4)",
+    borderColor: "rgba(245,166,35,0.4)",
   },
-  adminBadgeText: {
-    fontSize: 10,
+  roleBadgeText: {
+    fontSize: 9,
     fontWeight: "700",
-    color: "#F87171",
+    color: "#F5A623",
   },
   iconsRow: {
     flexDirection: "row",
-    gap: 7,
+    gap: 6,
     alignItems: "center",
     flexShrink: 0,
   },
   iconBtn: {
-    width: 38,
-    height: 38,
-    borderRadius: 10,
+    width: 34,
+    height: 34,
+    borderRadius: 9,
     backgroundColor: "#1E2D3D",
     borderWidth: 1.5,
     borderColor: "#C8960C",
@@ -237,7 +260,7 @@ const s = StyleSheet.create({
     position: "relative",
   },
   iconText: {
-    fontSize: 16,
+    fontSize: 15,
   },
   badge: {
     position: "absolute",
@@ -245,17 +268,17 @@ const s = StyleSheet.create({
     right: -4,
     backgroundColor: "#F87171",
     borderRadius: 8,
-    minWidth: 16,
-    height: 16,
+    minWidth: 15,
+    height: 15,
     justifyContent: "center",
     alignItems: "center",
-    paddingHorizontal: 3,
+    paddingHorizontal: 2,
     borderWidth: 1.5,
     borderColor: "#1B2838",
   },
   badgeText: {
     color: "#FFFFFF",
-    fontSize: 9,
+    fontSize: 8,
     fontWeight: "800",
   },
   overlay: {
@@ -263,7 +286,7 @@ const s = StyleSheet.create({
     backgroundColor: "rgba(0,0,0,0.4)",
     justifyContent: "flex-start",
     alignItems: "flex-end",
-    paddingTop: 110,
+    paddingTop: 100,
     paddingRight: 14,
   },
   menuBox: {
@@ -283,7 +306,7 @@ const s = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: 18,
-    paddingVertical: 13,
+    paddingVertical: 12,
     gap: 12,
   },
   menuIcon: { fontSize: 17 },

@@ -31,6 +31,8 @@ import AdminHeader from "../../components/AdminHeader";
 import AdminBottomNav from "../../components/AdminBottomNav";
 import { notifyMileageEntry } from "../../lib/notifications";
 import { useAuth } from "../_layout";
+import * as ImagePicker from "expo-image-picker";
+import * as FileSystem from "expo-file-system/legacy";
 
 // ─── Types ───────────────────────────────────────────────────
 interface Vehicle {
@@ -203,8 +205,30 @@ function VehicleFormModal({ visible, onClose, onSave, initial, employees }: Vehi
     }
   }, [initial, visible]);
 
-  function handlePhotoUpload() {
+  // Dekodowanie base64 → Uint8Array bez atob (działa na Hermes/Android)
+  function base64ToUint8Array(base64: string): Uint8Array {
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const lookup: Record<string, number> = {};
+    for (let i = 0; i < chars.length; i++) lookup[chars[i]] = i;
+    const clean = base64.replace(/[^A-Za-z0-9+/]/g, "");
+    const len = Math.floor((clean.length * 3) / 4);
+    const bytes = new Uint8Array(len);
+    let byteIndex = 0;
+    for (let i = 0; i < clean.length; i += 4) {
+      const a = lookup[clean[i]] ?? 0;
+      const b = lookup[clean[i + 1]] ?? 0;
+      const c = lookup[clean[i + 2]] ?? 0;
+      const d = lookup[clean[i + 3]] ?? 0;
+      bytes[byteIndex++] = (a << 2) | (b >> 4);
+      if (clean[i + 2] !== "=") bytes[byteIndex++] = ((b & 15) << 4) | (c >> 2);
+      if (clean[i + 3] !== "=") bytes[byteIndex++] = ((c & 3) << 6) | d;
+    }
+    return bytes.slice(0, byteIndex);
+  }
+
+  async function handlePhotoUpload() {
     if (Platform.OS === "web") {
+      // Web: natywny input[type=file]
       const input = document.createElement("input");
       input.type = "file";
       input.accept = "image/*";
@@ -220,11 +244,58 @@ function VehicleFormModal({ visible, onClose, onSave, initial, employees }: Vehi
           setPhotoUrl(url);
           setPhotoPath(path);
         } catch (err) {
-          console.error("Photo upload error:", err);
+          console.error("Photo upload error (web):", err);
         }
         setUploading(false);
       };
       input.click();
+    } else {
+      // Android / iOS: expo-image-picker
+      try {
+        // Poproś o uprawnienia
+        const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (status !== "granted") {
+          console.warn("Brak uprawnień do galerii.");
+          return;
+        }
+
+        const result = await ImagePicker.launchImageLibraryAsync({
+          mediaTypes: "images",
+          allowsEditing: true,
+          quality: 0.8,
+          base64: false,
+        });
+
+        if (result.canceled || !result.assets || result.assets.length === 0) return;
+        const asset = result.assets[0];
+
+        setUploading(true);
+        try {
+          // Odczytaj plik jako base64
+          const base64 = await FileSystem.readAsStringAsync(asset.uri, {
+            encoding: FileSystem.EncodingType.Base64,
+          });
+          const bytes = base64ToUint8Array(base64);
+
+          // Ustal nazwę pliku i mime type
+          const ext = asset.uri.split(".").pop()?.toLowerCase() || "jpg";
+          const fileName = `photo_${Date.now()}.${ext}`;
+          const mimeType = asset.mimeType || `image/${ext}`;
+          const path = `vehicles/${fileName}`;
+
+          const storageRef = ref(storage, path);
+          await uploadBytes(storageRef, bytes, { contentType: mimeType });
+          const url = await getDownloadURL(storageRef);
+          setPhotoUrl(url);
+          setPhotoPath(path);
+        } catch (err) {
+          console.error("Photo upload error (native):", err);
+        }
+        setUploading(false);
+      } catch (err) {
+        console.error("ImagePicker error:", err);
+        setUploading(false);
+      }
     }
   }
 

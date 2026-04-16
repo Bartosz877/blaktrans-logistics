@@ -103,7 +103,7 @@ export default function ProfilScreen() {
   const initials = (firstName[0] || "?").toUpperCase() + (lastName[0] || "").toUpperCase();
 
   function getRoleBadge(role?: string) {
-    if (!role) return { label: "Administrator", color: "#F87171", bg: "rgba(220,38,38,0.15)", border: "rgba(220,38,38,0.4)" };
+    if (!role) return { label: "Kierowca", color: "#60A5FA", bg: "rgba(96,165,250,0.15)", border: "rgba(96,165,250,0.4)" };
     const r = role.toLowerCase();
     if (r === "admin" || r === "administrator") {
       return { label: "Administrator", color: "#F87171", bg: "rgba(220,38,38,0.15)", border: "rgba(220,38,38,0.4)" };
@@ -111,7 +111,7 @@ export default function ProfilScreen() {
     if (r === "dygacz") {
       return { label: "Dygacz", color: "#F472B6", bg: "rgba(244,114,182,0.15)", border: "rgba(244,114,182,0.4)" };
     }
-    // driver, DRIVER, Kierowca — niebieski
+    // driver, DRIVER — niebieski
     return { label: "Kierowca", color: "#60A5FA", bg: "rgba(96,165,250,0.15)", border: "rgba(96,165,250,0.4)" };
   }
 

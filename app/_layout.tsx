@@ -3,14 +3,17 @@ import { Stack, useRouter, useSegments } from "expo-router";
 import { onAuthStateChanged, User } from "firebase/auth";
 import { auth } from "../lib/firebase";
 import { getUserData, AppUser } from "../lib/auth";
-import { View, ActivityIndicator } from "react-native";
+import { View, ActivityIndicator, Platform } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
+import { registerPushToken } from "../lib/pushNotifications";
 
 interface AuthContextType {
   user: AppUser | null;
   firebaseUser: User | null;
   loading: boolean;
   setUser: (u: AppUser | null) => void;
+  suspendedError: string | null;
+  setSuspendedError: (msg: string | null) => void;
 }
 
 const AuthContext = createContext<AuthContextType>({
@@ -18,6 +21,8 @@ const AuthContext = createContext<AuthContextType>({
   firebaseUser: null,
   loading: true,
   setUser: () => {},
+  suspendedError: null,
+  setSuspendedError: () => {},
 });
 
 export function useAuth() {
@@ -54,7 +59,7 @@ function AuthGuard({
         router.replace("/(admin)/statystyki");
       }
     } else if (user) {
-      // Kierowca i Dygacz (DRIVER) — panel użytkownika
+      // Kierowca (DRIVER), Dygacz (dygacz) i inne role — panel użytkownika
       if (!inDriver) {
         router.replace("/(driver)/dashboard");
       }
@@ -69,6 +74,32 @@ export default function RootLayout() {
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [user, setUser] = useState<AppUser | null>(null);
   const [loading, setLoading] = useState(true);
+  const [suspendedError, setSuspendedError] = useState<string | null>(null);
+
+  // Periodyczna walidacja sesji — co 30s sprawdza czy konto nie zostało zawieszone/usunięte
+  useEffect(() => {
+    if (!firebaseUser) return;
+    const interval = setInterval(async () => {
+      try {
+        const data = await getUserData(firebaseUser.uid);
+        // Konto OK — aktualizuj dane jeśli się zmieniły
+        setUser(data);
+      } catch (err: any) {
+        // Konto usunięte lub zawieszone — wyloguj
+        setUser(null);
+        setSuspendedError(
+          err?.message === "ACCOUNT_SUSPENDED"
+            ? "Konto zostało zawieszone"
+            : null
+        );
+        try {
+          const { signOut } = await import("firebase/auth");
+          await signOut(auth);
+        } catch {}
+      }
+    }, 30000); // co 30 sekund
+    return () => clearInterval(interval);
+  }, [firebaseUser?.uid]);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
@@ -77,9 +108,18 @@ export default function RootLayout() {
         try {
           const data = await getUserData(fbUser.uid);
           setUser(data);
-        } catch {
-          // Dokument w Firestore nie istnieje — wyloguj
+          // Zarejestruj token push (tylko na urządzeniu mobilnym)
+          if (Platform.OS !== "web") {
+            registerPushToken(fbUser.uid).catch(() => {});
+          }
+        } catch (err: any) {
+          // Konto usunięte lub zawieszone — wyloguj natychmiast
           setUser(null);
+          setSuspendedError(
+            err?.message === "ACCOUNT_SUSPENDED"
+              ? "Konto zostało zawieszone"
+              : null
+          );
           try {
             const { signOut } = await import("firebase/auth");
             await signOut(auth);
@@ -112,7 +152,7 @@ export default function RootLayout() {
 
   return (
     <SafeAreaProvider>
-      <AuthContext.Provider value={{ user, firebaseUser, loading, setUser }}>
+      <AuthContext.Provider value={{ user, firebaseUser, loading, setUser, suspendedError, setSuspendedError }}>
         <Stack screenOptions={{ headerShown: false }}>
           <Stack.Screen name="index" />
           <Stack.Screen name="(auth)" />

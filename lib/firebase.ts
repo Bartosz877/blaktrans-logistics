@@ -12,13 +12,22 @@ const firebaseConfig = {
   appId: "1:151784365587:android:1bf8b6880a3b64c70569e6",
 };
 
-// Initialize Firebase app (singleton pattern)
+// Initialize primary Firebase app (singleton pattern)
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
-
-// Auth — getAuth() is safe on Firebase 12.x with Expo SDK 54
-// Firebase 12.x resolves ESM correctly on Hermes
 const auth = getAuth(app);
 const db = getFirestore(app);
 const storage = getStorage(app);
 
-export { app, auth, db, storage };
+/**
+ * Secondary Firebase app — used ONLY for creating new user accounts by admin.
+ * Using a separate app instance prevents createUserWithEmailAndPassword from
+ * switching the current admin session (onAuthStateChanged would otherwise fire
+ * and redirect the admin to the driver panel).
+ */
+const SECONDARY_APP_NAME = "blaktrans-secondary";
+const secondaryApp =
+  getApps().find((a) => a.name === SECONDARY_APP_NAME) ??
+  initializeApp(firebaseConfig, SECONDARY_APP_NAME);
+const secondaryAuth = getAuth(secondaryApp);
+
+export { app, auth, db, storage, secondaryAuth };

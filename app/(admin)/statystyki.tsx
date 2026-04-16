@@ -280,7 +280,7 @@ export default function StatystykiScreen() {
   return (
     <View style={s.container}>
       <AdminHeader />
-      <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 20 }} showsVerticalScrollIndicator={false}>
+      <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 10, paddingBottom: 12 }} showsVerticalScrollIndicator={false}>
         <Text style={s.pageTitle}>📊 Statystyki</Text>
 
         {/* Pracownicy */}
@@ -433,15 +433,15 @@ export default function StatystykiScreen() {
 const sec = StyleSheet.create({
   card: {
     backgroundColor: "rgba(255,255,255,0.06)",
-    borderRadius: 16,
+    borderRadius: 12,
     borderWidth: 1,
-    padding: 16,
-    marginBottom: 14,
+    padding: 12,
+    marginBottom: 10,
   },
   title: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: "800",
-    marginBottom: 12,
+    marginBottom: 8,
     letterSpacing: 0.2,
   },
   emptyText: { color: "#687076", fontSize: 13, fontStyle: "italic" },
@@ -462,17 +462,17 @@ const sec = StyleSheet.create({
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#0D1B2A" },
   center: { justifyContent: "center", alignItems: "center" },
-  pageTitle: { fontSize: 22, fontWeight: "800", color: "#F5A623", marginBottom: 16, letterSpacing: 0.5 },
-  row3: { flexDirection: "row", gap: 10 },
-  statBox: { flex: 1, borderRadius: 12, borderWidth: 1, padding: 12, alignItems: "center" },
-  statNum: { fontSize: 28, fontWeight: "800", marginBottom: 4 },
-  statLabel: { color: "#8899AA", fontSize: 11, fontWeight: "600" },
-  alertRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 12, backgroundColor: "rgba(245,158,11,0.1)", borderRadius: 8, padding: 10 },
-  alertText: { color: "#FBBF24", fontSize: 12, fontWeight: "600", flex: 1 },
-  listRow: { flexDirection: "row", alignItems: "center", paddingVertical: 10, gap: 10 },
+  pageTitle: { fontSize: 18, fontWeight: "800", color: "#F5A623", marginBottom: 10, letterSpacing: 0.3 },
+  row3: { flexDirection: "row", gap: 8 },
+  statBox: { flex: 1, borderRadius: 10, borderWidth: 1, padding: 10, alignItems: "center" },
+  statNum: { fontSize: 22, fontWeight: "800", marginBottom: 2 },
+  statLabel: { color: "#8899AA", fontSize: 10, fontWeight: "600" },
+  alertRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 8, backgroundColor: "rgba(245,158,11,0.1)", borderRadius: 8, padding: 8 },
+  alertText: { color: "#FBBF24", fontSize: 11, fontWeight: "600", flex: 1 },
+  listRow: { flexDirection: "row", alignItems: "center", paddingVertical: 7, gap: 8 },
   listRowBorder: { borderBottomWidth: 1, borderBottomColor: "rgba(255,255,255,0.06)" },
-  listName: { color: "#FFFFFF", fontSize: 14, fontWeight: "600", marginBottom: 2 },
-  listSub: { color: "#8899AA", fontSize: 12 },
-  badge: { borderRadius: 8, borderWidth: 1, paddingHorizontal: 8, paddingVertical: 4 },
-  badgeText: { fontSize: 11, fontWeight: "700" },
+  listName: { color: "#FFFFFF", fontSize: 13, fontWeight: "600", marginBottom: 1 },
+  listSub: { color: "#8899AA", fontSize: 11 },
+  badge: { borderRadius: 7, borderWidth: 1, paddingHorizontal: 7, paddingVertical: 3 },
+  badgeText: { fontSize: 10, fontWeight: "700" },
 });
